@@ -966,12 +966,22 @@ class App:
             nome = _t(chave)
             self._nome_aba[chave] = nome
             self._tabs.add(nome)
-        self._tab_dir = self._tabs.tab(_t('Direção'))
-        self._tab_sensor = self._tabs.tab(_t('Sensor'))
-        self._tab_mapa = self._tabs.tab(_t('Botões'))
-        self._tab_presets = self._tabs.tab(_t('Presets'))
-        self._tab_ajustes = self._tabs.tab(_t('Ajustes'))
+            # conteúdo rola dentro da aba: nenhuma aba fura a janela, em
+            # qualquer altura/idioma (o conteúdo de Direção é mais alto
+            # que qualquer tela razoável)
+        self._tab_dir = self._tab_rolavel(_t('Direção'))
+        self._tab_sensor = self._tab_rolavel(_t('Sensor'))
+        self._tab_mapa = self._tab_rolavel(_t('Botões'))
+        self._tab_presets = self._tab_rolavel(_t('Presets'))
+        self._tab_ajustes = self._tab_rolavel(_t('Ajustes'))
         self._tab_ajustes_nome = self._nome_aba['Ajustes']
+
+    def _tab_rolavel(self, nome):
+        """Frame com scroll dentro da aba (o conteúdo pode ser mais alto
+        que a janela; a roda do mouse desce até o fim)."""
+        rol = ctk.CTkScrollableFrame(self._tabs.tab(nome), fg_color='transparent')
+        rol.pack(fill='both', expand=True)
+        return rol
 
     SLIDERS_CONDUCAO = (
         ('angulo_max', 'Ângulo máximo (graus)', 10, 90, 1),
@@ -1243,6 +1253,7 @@ class App:
         acende azul na posição certa; clique abre a janela de função."""
         mapa_quad = ctk.CTkFrame(self._tab_mapa, fg_color=COR_PAINEL2,
                                  corner_radius=10)
+        mapa_quad.pack(fill='x', padx=10, pady=(10, 6))
         self._mapa_frame = mapa_quad
         ctk.CTkLabel(
             mapa_quad, text=_t('MAPA DE BOTÕES  ·  acesa (vermelho) = '
@@ -1597,10 +1608,12 @@ class App:
             larg = max(1000,
                        self._barra_top.winfo_reqwidth() + 26,
                        self._tabs.winfo_reqwidth() + 26)
-            alt = max(640,
+            # altura: header + HUD + logs + a área de abas com folga para
+            # a aba Botões inteira (o map pede ~400px); o resto rola
+            alt = max(760,
                       self._barra_top.winfo_reqheight() +
-                      self.canv.winfo_reqheight() + 236 +
-                      self.txt_logs.winfo_reqheight())
+                      self.canv.winfo_reqheight() + 70 +
+                      self.txt_logs.winfo_reqheight() + 490)
             self.root.minsize(larg, alt)
         except Exception:
             pass

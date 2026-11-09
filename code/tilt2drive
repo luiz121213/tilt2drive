@@ -481,23 +481,32 @@ def botoes_apertados(buf, base):
 # descoberta do DualSense
 # ---------------------------------------------------------------------------
 def find_ds_hidraw():
+    """Hidraw do DualSense (Bluetooth OU USB); dá preferência a USB
+    (menor latência) quando os dois transportes estão conectados."""
     base = '/sys/class/hidraw'
     try:
-        names = sorted(os.listdir(base))
+        nomes = sorted(os.listdir(base))
     except OSError:
         return None
-    for name in names:
-        uevent = os.path.join(base, name, 'device', 'uevent')
+    melhor = None
+    for nome in nomes:
+        uevent = os.path.join(base, nome, 'device', 'uevent')
         try:
             with open(uevent) as fh:
                 txt = fh.read().upper()
         except OSError:
             continue
-        if not os.path.exists(os.path.join('/dev', name)):
+        if not os.path.exists(os.path.join('/dev', nome)):
             continue
-        if ('054C' in txt and '0CE6' in txt) or 'DUALSENSE' in txt:
-            return os.path.join('/dev', name)
-    return None
+        if not (('054C' in txt and '0CE6' in txt) or 'DUALSENSE' in txt):
+            continue
+        # USB: uevent traz PRODUCT=054c/0ce6/... (ou HID_ID=0003:...);
+        # Bluetooth: HID_ID=0005:...
+        prior = 0 if ('PRODUCT=054C/0CE6' in txt or 'HID_ID=0003' in txt) \
+            else 1
+        if melhor is None or prior < melhor[0]:
+            melhor = (prior, os.path.join('/dev', nome))
+    return melhor[1] if melhor else None
 
 
 def open_ds_or_wait():

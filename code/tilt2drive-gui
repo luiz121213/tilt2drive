@@ -15,6 +15,7 @@ Uso:
 Não rode o tilt2drive do terminal junto com a GUI (um leitor por vez).
 """
 import argparse
+import configparser
 import copy
 import math
 import os
@@ -111,28 +112,179 @@ ROTULOS_SAI = {'a': 'Botão A (xbox)', 'b': 'Botão B (xbox)',
                'k_left': 'Seta ← (teclado)',
                'k_right': 'Seta → (teclado)'}
 
-# ---- tema "F1": carbono + vermelho #e10600 ----
-COR_BG = '#0a0a0e'        # carbono (fundo)
-COR_PAINEL = '#15161c'    # cards / header
-COR_PAINEL2 = '#1b1c24'   # sub-cards
-COR_CARD = '#101116'      # painel interno do HUD
-COR_ITEM = '#26272f'      # trilhas/controles
-COR_TXT = '#f5f5f7'
-COR_MUT = '#9aa0ad'
-COR_GRADE = '#2a2b33'     # bordas
-COR_ACAO = '#e10600'      # vermelho F1: destaque geral
-COR_HOVER = '#c00500'
-COR_EIXO = '#e10600'      # curva de esterço / sliders
-COR_NEEDLE = '#ffcf3f'
-COR_OK = '#00c56f'
-COR_WARN = '#ffcf3f'
-COR_ERR = '#ff4d40'
-COR_FREIO = '#e10600'
+# ---- tema "F1" com suporte claro/escuro + i18n (idioma/tema em [ui]) ----
+_TEMAS = {
+    'escuro': {
+        'COR_BG': '#0a0a0e', 'COR_PAINEL': '#15161c', 'COR_PAINEL2': '#1b1c24',
+        'COR_CARD': '#101116', 'COR_ITEM': '#26272f', 'COR_TXT': '#f5f5f7',
+        'COR_MUT': '#9aa0ad', 'COR_GRADE': '#2a2b33', 'COR_ACAO': '#e10600',
+        'COR_HOVER': '#c00500', 'COR_EIXO': '#e10600', 'COR_NEEDLE': '#ffcf3f',
+        'COR_OK': '#00c56f', 'COR_WARN': '#ffcf3f', 'COR_ERR': '#ff4d40',
+        'COR_FREIO': '#e10600',
+    },
+    'claro': {
+        'COR_BG': '#eef1f6', 'COR_PAINEL': '#ffffff', 'COR_PAINEL2': '#f2f5fa',
+        'COR_CARD': '#f8fafd', 'COR_ITEM': '#e3e9f2', 'COR_TXT': '#171a21',
+        'COR_MUT': '#5a6272', 'COR_GRADE': '#c9d1de', 'COR_ACAO': '#e10600',
+        'COR_HOVER': '#b90400', 'COR_EIXO': '#e10600', 'COR_NEEDLE': '#c98a00',
+        'COR_OK': '#0a9c58', 'COR_WARN': '#c98a00', 'COR_ERR': '#d03020',
+        'COR_FREIO': '#e10600',
+    },
+}
+TEMA_ATIVO = 'escuro'
+
+
+def _aplicar_tokens(tema):
+    """Espalha a paleta escolhida nas variáveis COR_* do módulo."""
+    global TEMA_ATIVO
+    TEMA_ATIVO = tema if tema in _TEMAS else 'escuro'
+    for k, v in _TEMAS[TEMA_ATIVO].items():
+        globals()[k] = v
+_aplicar_tokens('escuro')
+
 F_LOGO = ('DejaVu Sans Condensed', 21, 'bold', 'italic')
 F_TIT = ('DejaVu Sans Condensed', 12, 'bold')
 F_TXT = ('DejaVu Sans Condensed', 12)
 F_SUP = ('DejaVu Sans Condensed', 11)
 F_MONO = ('DejaVu Sans Mono', 11)
+
+# ---- i18n: chaves = strings PT-BR do código ----
+LINGUA = 'pt'
+TR = {
+    'en': {
+        'Salvar config': 'Save config', 'Reconectar': 'Reconnect',
+        'Recalibrar': 'Recalibrate', 'PARAR MOTOR': 'STOP ENGINE',
+        'LIGAR MOTOR': 'START ENGINE', 'IGNORAR CONTROLE': 'IGNORE CTRL',
+        'Ajustes': 'Settings',
+        'Direção': 'Steering', 'Sensor': 'Sensor', 'Botões': 'Buttons',
+        'Presets': 'Presets',
+        'DISPOSITIVO VIRTUAL': 'VIRTUAL DEVICE',
+        'CONTROLE (XBOX)': 'CONTROLLER (XBOX)', 'VOLANTE': 'WHEEL',
+        '%s — CONDUÇÃO': '%s — DRIVING',
+        'DIREÇÃO': 'STEERING',
+        'PEDAIS E ROTAÇÃO (L2 = freio · R2 = acelerador)':
+            'PEDALS & ROTATION (L2 = brake · R2 = throttle)',
+        'repouso detectado: —': 'rest detected: —',
+        'SENSOR (COMUM AOS DOIS MODOS)': 'SENSOR (COMMON TO BOTH MODES)',
+        'PRESETS DE CONFIGURAÇÃO': 'CONFIG PRESETS',
+        'Restaurar padrões': 'Restore defaults',
+        'MAPA DE BOTÕES  ·  acesa (vermelho) = pressionado  ·  clique um '
+        'botão para escolher a função':
+            'BUTTON MAP  ·  lit (red) = pressed  ·  click a button to '
+            'choose its function',
+        'Salvar como preset…': 'Save as preset…',
+        'Excluir preset': 'Delete preset',
+        'selecionar na lista carrega a config na hora':
+            'picking from the list loads the config instantly',
+        'Tema da interface': 'Interface theme', 'Idioma': 'Language',
+        'Temas': 'Themes', 'again?': 'again?',
+        # sliders / moves
+        'Ângulo máximo (graus)': 'Max angle (degrees)',
+        'Zona morta (graus)': 'Deadzone (degrees)',
+        'Suavização (s)': 'Smoothing (s)',
+        'Taxa total (graus/s)  [modo taxa]': 'Total rate (deg/s)  [rate mode]',
+        'Curva de resposta do esterço (1.0 = linear)':
+            'Steering response curve (1.0 = linear)',
+        'Rotação do volante (graus)': 'Wheel rotation (degrees)',
+        'Freio (L2): zona morta': 'Brake (L2): deadzone',
+        'Acelerador (R2): zona morta': 'Throttle (R2): deadzone',
+        'Freio: curva': 'Brake: curve', 'Acelerador: curva': 'Throttle: curve',
+        'Peso do acelerômetro': 'Accelerometer weight',
+        'Eixo de giro (x/y/z fixa o eixo; auto detecta)':
+            'Gyro axis (x/y/z fixes it; auto detects)',
+        'Guardar calibração detectada': 'Save detected calibration',
+        'curva < 1.0 = agressivo (inclinando pouco já vira muito)   '
+        '·   1.0 = linear   ·   curva > 1.0 = começa suave (mais '
+        'precisão dos pequenos ângulos até o máximo)':
+            'curve < 1.0 = aggressive (a small tilt already turns a lot)   '
+            '·   1.0 = linear   ·   curve > 1.0 = starts soft (more '
+            'precision on small angles up to the max)',
+        # motor (status/logs)
+        'iniciando...': 'starting...', 'motor parado': 'engine stopped',
+        'calibrando — segure o controle parado...':
+            'calibrating — hold the controller still...',
+        'recalibrando — segure o controle parado...':
+            'recalibrating — hold the controller still...',
+        'desconectado — aguardando...': 'disconnected — waiting...',
+        'erro: %s': 'error: %s', 'ativo: %s': 'active: %s',
+        'calibração: %s': 'calibration: %s', 'recalibração: %s':
+            'recalibration: %s', 'uinput: %s': 'uinput: %s',
+        'grab renovado p/ o novo device: %d node(s)':
+            'grab renewed for the new device: %d node(s)',
+        'jogo vai ignorar o controle físico: %d node(s) '
+        'capturado(s)':
+            'game will ignore the physical controller: %d node(s) grabbed',
+        'ignorar: nenhum node do DualSense capturado — controle '
+        'presente?':
+            'ignore: no DualSense node grabbed — is the controller connected?',
+        'controle físico devolvido ao sistema (%d node(s))':
+            'physical controller returned to the system (%d node(s))',
+        'config salva em %s': 'config saved to %s',
+        'erro ao salvar: %s': 'save error: %s',
+        'erro ao salvar preset: %s': 'preset save error: %s',
+        'preset "%s" salvo': 'preset "%s" saved',
+        'preset "%s" carregado': 'preset "%s" loaded',
+        'preset "%s" excluído': 'preset "%s" deleted',
+        'config restaurada para os padrões':
+            'config restored to defaults',
+        # diálogo do mapa
+        'Função do botão': 'Button function',
+        '"%s" → o que enviar ao device virtual:':
+            '"%s" → what to send to the virtual device:',
+        'Escolha na lista e clique em Aplicar (duplo clique também '
+        'aplica).':
+            'Pick from the list and click Apply (double-click also '
+            'applies).',
+        'Aplicar': 'Apply', 'Cancelar': 'Cancel',
+        # diálogos
+        'Restaurar padrões?': 'Restore defaults?',
+        'Volta direção, sensor, volante, mapa e o modo do dispositivo '
+        'para os padrões de fábrica?':
+            'Reset steering, sensor, wheel, button map and device mode '
+            'back to factory defaults?',
+        'Salvar preset': 'Save preset', 'Nome do preset (vai para a '
+        'lista):': 'Preset name (goes to the list):',
+        'Preset "%s" já existe. Sobrescrever?':
+            'Preset "%s" already exists. Overwrite?',
+        'Excluir preset?': 'Delete preset?',
+        'Apagar o preset "%s"?': 'Delete preset "%s"?',
+        # janela + ajustes
+        'Tilt2Drive — Direção por giroscópio (DualSense)':
+            'Tilt2Drive — Steering by gyroscope (DualSense)',
+        'TEMA DA INTERFACE': 'INTERFACE THEME',
+        'IDIOMA': 'LANGUAGE',
+        'Escolhe tema/idioma; o app reinicia para aplicar.':
+            'Pick theme/language; the app restarts to apply.',
+        'Tema': 'Theme', 'Escuro': 'Dark', 'Claro': 'Light',
+        'Português (Brasil)': 'Portuguese (Brazil)',
+        'English': 'English',
+        'engine: %r': 'engine: %r',
+        'mapa: %s → %s': 'map: %s → %s',
+        # status residuais do motor
+        'sem permissão em %s — rode: sudo tilt2drive-gui':
+            'no permission on %s — run: sudo tilt2drive-gui',
+        'aguardando DualSense (conecte pelo Bluetooth)...':
+            'waiting for DualSense (connect via Bluetooth)...',
+        'erro inesperado: %r': 'unexpected error: %r',
+        'VOLANTE — CONDUÇÃO': 'WHEEL — DRIVING',
+        'repouso: freio %.0f / acel %.0f (subtraído)':
+            'rest: brake %.0f / accel %.0f (subtracted)',
+        'reinicia': 'restarts',
+    },
+}
+
+
+def _t(s):
+    return TR.get(LINGUA, {}).get(s, s)
+
+
+def ler_ui(path):
+    """Seção [ui] do conf: tema/idioma da interface (padrão: escuro/pt)."""
+    cp = configparser.ConfigParser(strict=False)
+    cp.read(path)
+    get = lambda k, d: cp.get('ui', k, fallback=d).strip().lower() \
+        if cp.has_section('ui') else d
+    return {'tema': get('tema', 'escuro'), 'idioma': get('idioma', 'pt')}
 
 ACC_G = 8192.0          # LSB por g no DualSense
 JANELA_HIST = 260       # amostras do gráfico (~8,5 s a 30 Hz)
@@ -157,13 +309,13 @@ class Engine(threading.Thread):
         self._grab_caminho = ''    # hidraw vigente quando o grab foi feito
         self._nrep = 0
         self.state = {
-            'status': 'iniciando...', 'cor': COR_MUT, 'hidraw': '',
+            'status': _t('iniciando...'), 'cor': COR_MUT, 'hidraw': '',
             'angle': 0.0, 'out': 0.0, 'dps': 0.0,
             'accel_g': (0.0, 0.0, 0.0), 'ga': 0.0, 'rps': 0.0,
             'pedais': (0.0, 0.0),
             'eixos': None, 'virtual': False, 'eixo_detectado': None,
             'pedal_rest': (0.0, 0.0), 'botoes': (),
-            'cor': COR_MUT, 'status': 'iniciando...',
+            'cor': COR_MUT, 'status': _t('iniciando...'),
         }
         self._logs = deque(maxlen=8)
         M.log = self._module_log   # captura os logs do módulo (calibração etc.)
@@ -185,18 +337,18 @@ class Engine(threading.Thread):
             hid = self.state.get('hidraw', '')
         if val:
             n = self._grab_renovar(hid)
-            msg = ('jogo vai ignorar o controle físico: %d node(s) '
-                   'capturado(s)' % n if n else
-                   'ignorar: nenhum node do DualSense capturado — controle '
-                   'presente?')
+            msg = (_t('jogo vai ignorar o controle físico: %d node(s) '
+                      'capturado(s)') % n if n else
+                   _t('ignorar: nenhum node do DualSense capturado — '
+                      'controle presente?'))
             with self._lock:
                 self._logs.append(msg)
         else:
             n = self._grab_soltar()
             if n:
                 with self._lock:
-                    self._logs.append('controle físico devolvido ao '
-                                      'sistema (%d node(s))' % n)
+                    self._logs.append(_t('controle físico devolvido ao '
+                                         'sistema (%d node(s))') % n)
 
     def _grab_renovar(self, hid_atual):
         """Refaz a captura (fecha os fds antigos e reabre os nodes atuais)."""
@@ -230,8 +382,11 @@ class Engine(threading.Thread):
             try:
                 with open(os.path.join(devdir, 'name'), encoding='utf-8',
                           errors='replace') as fh:
-                    if 'DualSense Wireless Controller' not in fh.read():
-                        continue
+                    nome_dev = fh.read()
+                if 'DualSense' not in nome_dev and \
+                        'Wireless Controller' not in nome_dev:
+                    continue   # USB: "...DualSense Wireless Controller"/
+                               #  BT:  "...Wireless Controller" (sem DualSense)
                 with open(os.path.join(devdir, 'device', 'id', 'vendor'),
                           encoding='ascii') as fh:
                     if int(fh.read().strip(), 16) != 0x054C:
@@ -262,8 +417,8 @@ class Engine(threading.Thread):
             return
         n = self._grab_renovar(path_atual)
         with self._lock:
-            self._logs.append('grab renovado p/ o novo device: %d node(s)'
-                              % n)
+            self._logs.append(_t('grab renovado p/ o novo device: '
+                                 '%d node(s)') % n)
 
     # ---- comunicação com a GUI ----
     def _module_log(self, msg='', end='\n'):
@@ -378,10 +533,10 @@ class Engine(threading.Thread):
                     return (os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC),
                             path)
                 except PermissionError:
-                    self.status('sem permissão em %s — rode: sudo tilt2drive-gui',
+                    self.status(_t('sem permissão em %s — rode: sudo tilt2drive-gui') %
                                 COR_ERR)
             else:
-                self.status('aguardando DualSense (conecte pelo Bluetooth)...',
+                self.status(_t('aguardando DualSense (conecte pelo Bluetooth)...'),
                             COR_MUT)
             if not self._wait(1.5):
                 return None, None
@@ -400,14 +555,14 @@ class Engine(threading.Thread):
                     fd, path = self._abrir_dispositivo()
                     if fd is None or self._stop:
                         break
-                    self.status('calibrando — segure o controle parado...', COR_WARN)
+                    self.status(_t('calibrando — segure o controle parado...'), COR_WARN)
                     try:
                         sensor = M.Sensor(copy.deepcopy(self.cfg['sensor']))
                         sensor.calibrate(fd)
                     except (RuntimeError, OSError) as e:
-                        self.status('erro: %s' % e, COR_ERR)
+                        self.status(_t('erro: %s') % e, COR_ERR)
                         with self._lock:
-                            self._logs.append('calibração: %s' % e)
+                            self._logs.append(_t('calibração: %s') % e)
                         try:
                             os.close(fd)
                         except OSError:
@@ -433,10 +588,10 @@ class Engine(threading.Thread):
                         except OSError as e:
                             steer = None
                             with self._lock:
-                                self._logs.append('uinput: %s' % e)
+                                self._logs.append(_t('uinput: %s') % e)
                     self._steer = steer
                     self._pub_eixos(sensor)
-                    self.status('ativo: %s' % path, COR_OK)
+                    self.status(_t('ativo: %s') % path, COR_OK)
                     self._grab_renovar_se(path)
                     ultima = time.monotonic()
                 if self._trocar_modo:
@@ -457,10 +612,10 @@ class Engine(threading.Thread):
                         except OSError as e:
                             steer = None
                             with self._lock:
-                                self._logs.append('uinput: %s' % e)
+                                self._logs.append(_t('uinput: %s') % e)
                 if self._recal:
                     self._recal = False
-                    self.status('recalibrando — segure o controle parado...',
+                    self.status(_t('recalibrando — segure o controle parado...'),
                                 COR_WARN)
                     try:
                         sensor = M.Sensor(copy.deepcopy(self.cfg['sensor']))
@@ -468,11 +623,11 @@ class Engine(threading.Thread):
                         self.sensor = sensor
                         self._persistir_calibracao(sensor)
                         self._pub_eixos(sensor)
-                        self.status('ativo: %s' % path, COR_OK)
+                        self.status(_t('ativo: %s') % path, COR_OK)
                     except (RuntimeError, OSError) as e:
-                        self.status('erro: %s' % e, COR_ERR)
+                        self.status(_t('erro: %s') % e, COR_ERR)
                         with self._lock:
-                            self._logs.append('recalibração: %s' % e)
+                            self._logs.append(_t('recalibração: %s') % e)
                 if self._reopen:
                     self._reopen = False
                     try:
@@ -485,7 +640,7 @@ class Engine(threading.Thread):
                 r, _, _ = select.select([fd], [], [], 0.3)
                 if not r:
                     if not os.path.exists(path):
-                        self.status('desconectado — aguardando...', COR_WARN)
+                        self.status(_t('desconectado — aguardando...'), COR_WARN)
                         try:
                             os.close(fd)
                         except OSError:
@@ -543,9 +698,9 @@ class Engine(threading.Thread):
                     self._nrep = 0
                     ultima = agora
         except Exception as e:
-            self.status('erro inesperado: %r' % e, COR_ERR)
+            self.status(_t('erro inesperado: %r') % e, COR_ERR)
             with self._lock:
-                self._logs.append('engine: %r' % e)
+                self._logs.append(_t('engine: %r') % e)
         finally:
             if steer:
                 try:
@@ -558,7 +713,7 @@ class Engine(threading.Thread):
                     os.close(fd)
                 except OSError:
                     pass
-            self.status('motor parado', COR_MUT)
+            self.status(_t('motor parado'), COR_MUT)
 
     def _pub_eixos(self, sensor):
         with self._lock:
@@ -621,6 +776,11 @@ acel_curva = {a_curva}
 freio_repouso = {f_rep}
 acel_repouso = {a_rep}
 
+[ui]
+# interface: tema (escuro | claro) e idioma (pt | en)
+tema = {ui_tema}
+idioma = {ui_idioma}
+
 [mapa_botoes]
 # entradas do DualSense -> saídas do controle virtual
 {mapa}
@@ -645,7 +805,9 @@ acel_repouso = {a_rep}
            v_modo=dv['modo'], v_angulo_max=dv['angulo_max'],
            v_zona_morta=dv['zona_morta'], v_tau=dv['suavizacao_tau'],
            v_taxa=dv['taxa_giro_total'], v_inv=int(dv['inverter']),
-           v_curva=dv.get('curva', 1.0))
+           v_curva=dv.get('curva', 1.0),
+           ui_tema=cfg.get('ui', {}).get('tema', 'escuro'),
+           ui_idioma=cfg.get('ui', {}).get('idioma', 'pt'))
     with open(path, 'w') as fh:
         fh.write(texto)
 
@@ -679,9 +841,9 @@ def preset_path(nome):
 class App:
     def __init__(self, cfg):
         self.cfg = cfg
-        ctk.set_appearance_mode('dark')
+        ctk.set_appearance_mode('light' if TEMA_ATIVO == 'claro' else 'dark')
         self.root = ctk.CTk()
-        self.root.title('Tilt2Drive — Direção por giroscópio (DualSense)')
+        self.root.title(_t('Tilt2Drive — Direção por giroscópio (DualSense)'))
         self.root.minsize(900, 640)
         self.root.geometry('1180x860')
         self.root.configure(fg_color=COR_BG)
@@ -714,10 +876,12 @@ class App:
         self._montar_tabs()
         self._montar_config()
         self._montar_presets()
+        self._montar_ajustes()
         self.engine.start()
 
         self.root.protocol('WM_DELETE_WINDOW', self._fechar)
         self.root.after(60, self._tick)
+        self.root.after(140, self._ajustar_minsize)
 
     # --------------------------------------------------------------- UI
     def _botao(self, pai, texto, cb, prim=False):
@@ -735,44 +899,47 @@ class App:
     def _montar_toolbar(self):
         # listra fina vermelha no topo (assinatura de transmissão F1)
         tk.Frame(self.root, bg=COR_ACAO, height=3).pack(fill='x')
-        bar = ctk.CTkFrame(self.root, corner_radius=0, fg_color=COR_PAINEL,
-                           height=58)
+        bar = ctk.CTkFrame(self.root, corner_radius=0, fg_color=COR_PAINEL)
         bar.pack(fill='x')
-        bar.pack_propagate(False)
+        self._barra_top = bar
         self.lbl_logo1 = ctk.CTkLabel(bar, text='TILT2', font=F_LOGO,
                                       text_color=COR_TXT)
-        self.lbl_logo1.pack(side='left', padx=(18, 0))
+        self.lbl_logo1.pack(side='left', padx=(18, 0), pady=13)
         self.lbl_logo2 = ctk.CTkLabel(bar, text='DRIVE', font=F_LOGO,
                                       text_color=COR_ACAO)
-        self.lbl_logo2.pack(side='left')
+        self.lbl_logo2.pack(side='left', pady=13)
         pill = ctk.CTkFrame(bar, fg_color=COR_PAINEL2, corner_radius=16,
                             border_width=1, border_color=COR_GRADE)
-        pill.pack(side='left', padx=(18, 0), pady=10)
+        pill.pack(side='left', padx=(18, 0), pady=13)
         linha_p = ctk.CTkFrame(pill, fg_color='transparent')
         linha_p.pack(fill='both', expand=True, padx=12, pady=4)
-        self.lbl_status = ctk.CTkLabel(linha_p, text='iniciando...',
+        self.lbl_status = ctk.CTkLabel(linha_p, text=_t('iniciando...'),
                                        text_color=COR_MUT, font=F_TXT)
         self.lbl_status.pack(side='left')
         self.lbl_hid = ctk.CTkLabel(linha_p, text='', text_color=COR_MUT,
                                     font=('DejaVu Sans Mono', 10))
         self.lbl_hid.pack(side='left', padx=(12, 0))
-        self.lbl_ign = ctk.CTkLabel(bar, text='IGNORAR CONTROLE',
+        self.lbl_ign = ctk.CTkLabel(bar, text=_t('IGNORAR CONTROLE'),
                                     text_color=COR_MUT, font=F_SUP)
-        self.lbl_ign.pack(side='right', padx=(12, 16))
+        self.lbl_ign.pack(side='right', padx=(12, 16), pady=13)
         self._sw_ignorar = ctk.CTkSwitch(
             bar, text='', command=self._cb_ignorar, width=46,
             progress_color=COR_ACAO, fg_color=COR_ITEM,
             button_color='#f5f5f7')
-        self._sw_ignorar.pack(side='right', padx=(8, 0))
-        self.btn_motor = self._botao(bar, 'PARAR MOTOR', self._toggle_motor,
-                                     prim=True)
-        self.btn_motor.pack(side='right', padx=(10, 16))
-        self._botao(bar, 'Recalibrar',
-                    self.engine.recalibrar).pack(side='right', padx=(6, 6))
-        self._botao(bar, 'Reconectar',
-                    self.engine.reconectar).pack(side='right', padx=(6, 0))
-        self._botao(bar, 'Salvar config', self._salvar).pack(side='right',
-                                                             padx=(6, 0))
+        self._sw_ignorar.pack(side='right', padx=(8, 0), pady=13)
+        self.btn_motor = self._botao(bar, _t('PARAR MOTOR'),
+                                     self._toggle_motor, prim=True)
+        self.btn_motor.pack(side='right', padx=(10, 16), pady=13)
+        self._botao(bar, _t('Ajustes'), self._cb_ajustes) \
+            .pack(side='right', padx=(6, 6), pady=13)
+        self._botao(bar, _t('Recalibrar'),
+                    self.engine.recalibrar).pack(side='right', padx=(6, 0),
+                                                 pady=13)
+        self._botao(bar, _t('Reconectar'),
+                    self.engine.reconectar).pack(side='right', padx=(6, 0),
+                                                 pady=13)
+        self._botao(bar, _t('Salvar config'),
+                    self._salvar).pack(side='right', padx=(6, 0), pady=13)
 
     def _montar_canvas(self):
         frame = ctk.CTkFrame(self.root, fg_color=COR_PAINEL, corner_radius=12,
@@ -794,12 +961,17 @@ class App:
             text_color=COR_TXT)
         self._tabs.pack(fill='both', expand=True, padx=12, pady=(4, 4))
         self._tabs._segmented_button.configure(font=F_SUP)
-        for nome in ('Direção', 'Sensor', 'Botões', 'Presets'):
+        self._nome_aba = {}
+        for chave in ('Direção', 'Sensor', 'Botões', 'Presets', 'Ajustes'):
+            nome = _t(chave)
+            self._nome_aba[chave] = nome
             self._tabs.add(nome)
-        self._tab_dir = self._tabs.tab('Direção')
-        self._tab_sensor = self._tabs.tab('Sensor')
-        self._tab_mapa = self._tabs.tab('Botões')
-        self._tab_presets = self._tabs.tab('Presets')
+        self._tab_dir = self._tabs.tab(_t('Direção'))
+        self._tab_sensor = self._tabs.tab(_t('Sensor'))
+        self._tab_mapa = self._tabs.tab(_t('Botões'))
+        self._tab_presets = self._tabs.tab(_t('Presets'))
+        self._tab_ajustes = self._tabs.tab(_t('Ajustes'))
+        self._tab_ajustes_nome = self._nome_aba['Ajustes']
 
     SLIDERS_CONDUCAO = (
         ('angulo_max', 'Ângulo máximo (graus)', 10, 90, 1),
@@ -830,11 +1002,13 @@ class App:
         quad.pack(fill='x', padx=10, pady=(10, 6))
         topo = ctk.CTkFrame(quad, fg_color='transparent')
         topo.pack(fill='x', padx=12, pady=(12, 8))
-        ctk.CTkLabel(topo, text='DISPOSITIVO VIRTUAL',
+        ctk.CTkLabel(topo, text=_t('DISPOSITIVO VIRTUAL'),
                      font=F_TIT, text_color=COR_MUT).pack(side='left')
         self._var_disp = tk.StringVar(
             value='volante' if self.cfg.get('dispositivo', {}).get(
                 'modo') == 'volante' else 'xbox')
+        self._DISP_LBL = {_t('CONTROLE (XBOX)'): 'xbox',
+                          _t('VOLANTE'): 'volante'}
         seg = ctk.CTkSegmentedButton(
             topo, values=list(self._DISP_LBL), command=self._cb_disp_seg,
             font=F_SUP, height=32, fg_color=COR_ITEM,
@@ -853,7 +1027,7 @@ class App:
         self._seg_sync = _seg_sync
         self._var_disp.trace_add('write', _seg_sync)
         _seg_sync()                                  # posiciona o segmented
-        self._botao(quad, 'Restaurar padrões',
+        self._botao(quad, _t('Restaurar padrões'),
                     self._restaurar_padroes).pack(side='bottom', anchor='e',
                                                   padx=12, pady=(0, 10))
 
@@ -880,11 +1054,11 @@ class App:
             value='invertida' if self.cfg[sec]['inverter'] < 0 else 'normal')
         topo = ctk.CTkFrame(quad, fg_color='transparent')
         topo.pack(fill='x', padx=12, pady=(12, 4))
-        ctk.CTkLabel(topo, text='%s — CONDUÇÃO' % titulo,
+        ctk.CTkLabel(topo, text=_t('%s — CONDUÇÃO') % titulo,
                      font=F_TIT, text_color=COR_MUT).pack(side='left')
         col = ctk.CTkFrame(topo, fg_color='transparent')
         col.pack(side='right')
-        ctk.CTkLabel(col, text='DIREÇÃO', text_color=COR_MUT,
+        ctk.CTkLabel(col, text=_t('DIREÇÃO'), text_color=COR_MUT,
                      font=F_SUP).pack(anchor='w')
         self._menu(col, ['normal', 'invertida'], self.v_inv[sec],
                    lambda val, s=sec: self._cb_inverter(s)) \
@@ -904,11 +1078,11 @@ class App:
             value='invertida' if self.cfg[sec]['inverter'] < 0 else 'normal')
         topo = ctk.CTkFrame(quad, fg_color='transparent')
         topo.pack(fill='x', padx=12, pady=(12, 4))
-        ctk.CTkLabel(topo, text='VOLANTE — CONDUÇÃO',
+        ctk.CTkLabel(topo, text=_t('VOLANTE — CONDUÇÃO'),
                      font=F_TIT, text_color=COR_MUT).pack(side='left')
         col = ctk.CTkFrame(topo, fg_color='transparent')
         col.pack(side='right')
-        ctk.CTkLabel(col, text='DIREÇÃO', text_color=COR_MUT,
+        ctk.CTkLabel(col, text=_t('DIREÇÃO'), text_color=COR_MUT,
                      font=F_SUP).pack(anchor='w')
         self._menu(col, ['normal', 'invertida'], self.v_inv[sec],
                    lambda val, s=sec: self._cb_inverter(s)) \
@@ -918,10 +1092,10 @@ class App:
                             dica=self.DICA_CURVA)
         rot_peds = ctk.CTkFrame(quad, fg_color='transparent')
         rot_peds.pack(fill='x', padx=12, pady=(2, 0))
-        ctk.CTkLabel(rot_peds, text='PEDAIS E ROTAÇÃO (L2 = freio · '
-                                    'R2 = acelerador)',
+        ctk.CTkLabel(rot_peds, text=_t('PEDAIS E ROTAÇÃO (L2 = freio · '
+                                       'R2 = acelerador)'),
                      font=F_TIT, text_color=COR_MUT).pack(side='left')
-        self.lbl_pedais = ctk.CTkLabel(rot_peds, text='repouso detectado: —',
+        self.lbl_pedais = ctk.CTkLabel(rot_peds, text=_t('repouso detectado: —'),
                                        text_color=COR_MUT, font=F_SUP)
         self.lbl_pedais.pack(side='right')
         peds = ctk.CTkFrame(quad, fg_color='transparent')
@@ -936,7 +1110,7 @@ class App:
         quad.pack(fill='x', padx=10, pady=(10, 6))
         top = ctk.CTkFrame(quad, fg_color='transparent')
         top.pack(fill='x', padx=12, pady=(12, 6))
-        ctk.CTkLabel(top, text='SENSOR (COMUM AOS DOIS MODOS)',
+        ctk.CTkLabel(top, text=_t('SENSOR (COMUM AOS DOIS MODOS)'),
                      font=F_TIT, text_color=COR_MUT).pack(side='left')
         linha = ctk.CTkFrame(quad, fg_color='transparent')
         linha.pack(fill='x', padx=12, pady=(0, 10))
@@ -957,7 +1131,7 @@ class App:
                  self._cb_salvar_cal)):
             col = ctk.CTkFrame(linha, fg_color='transparent')
             col.pack(side='left', padx=(0, 30))
-            ctk.CTkLabel(col, text=texto, text_color=COR_MUT,
+            ctk.CTkLabel(col, text=_t(texto), text_color=COR_MUT,
                          font=F_SUP).pack(anchor='w')
             self._menu(col, valores, var, cb).pack(anchor='w', pady=(2, 0))
         self._grade_sliders(
@@ -989,7 +1163,7 @@ class App:
             cell = ctk.CTkFrame(grade, fg_color='transparent')
             cell.grid(row=linha_inicial + i // 2, column=i % 2,
                       sticky='nwe', padx=6, pady=3)
-            ctk.CTkLabel(cell, text=rotulo, text_color=COR_MUT,
+            ctk.CTkLabel(cell, text=_t(rotulo), text_color=COR_MUT,
                          wraplength=210, justify='left', anchor='w',
                          font=F_SUP).pack(anchor='w', fill='x')
             var = tk.DoubleVar(value=float(self.cfg.get(sec, {}).get(
@@ -1045,7 +1219,7 @@ class App:
         for col in range(2):
             grade.columnconfigure(col, weight=1, uniform='sliders')
         if dica:
-            ctk.CTkLabel(quad, text=dica, text_color=COR_MUT,
+            ctk.CTkLabel(quad, text=_t(dica), text_color=COR_MUT,
                          wraplength=520, justify='left', font=F_SUP) \
                 .pack(fill='x', padx=16, pady=(0, 10))
 
@@ -1071,9 +1245,9 @@ class App:
                                  corner_radius=10)
         self._mapa_frame = mapa_quad
         ctk.CTkLabel(
-            mapa_quad, text='MAPA DE BOTÕES  ·  acesa (vermelho) = '
-                            'pressionado  ·  clique um botão para escolher '
-                            'a função',
+            mapa_quad, text=_t('MAPA DE BOTÕES  ·  acesa (vermelho) = '
+                               'pressionado  ·  clique um botão para '
+                               'escolher a função'),
             font=F_TIT, text_color=COR_MUT).pack(anchor='w', padx=12,
                                                  pady=(12, 2))
         c = tk.Canvas(mapa_quad, width=640, height=340, bg=COR_CARD,
@@ -1279,7 +1453,7 @@ class App:
                                     Steer.MAPA_PADRAO.items()})
         atual = mapa.get(nome, Steer.MAPA_PADRAO.get(nome, 'none'))
         win = tk.Toplevel(self.root)
-        win.title('Função do botão')
+        win.title(_t('Função do botão'))
         win.configure(bg=COR_PAINEL)
         win.transient(self.root)
         win.resizable(False, False)
@@ -1288,12 +1462,12 @@ class App:
         quad.pack(fill='both', expand=True)
         tk.Label(quad, bg=COR_PAINEL, fg=COR_TXT,
                  font=F_TIT,
-                 text='"%s" → o que enviar ao device virtual:'
+                 text=_t('"%s" → o que enviar ao device virtual:')
                  % ROTULOS_DS.get(nome, nome)).pack(
             anchor='w', padx=14, pady=(12, 4))
         tk.Label(quad, bg=COR_PAINEL, fg=COR_MUT, font=F_SUP,
-                 text='Escolha na lista e clique em Aplicar (duplo clique '
-                      'também aplica).').pack(anchor='w', padx=14)
+                 text=_t('Escolha na lista e clique em Aplicar (duplo '
+                         'clique também aplica).')).pack(anchor='w', padx=14)
         lq = tk.Frame(quad, bg=COR_CARD, bd=1, relief='flat',
                       highlightthickness=1, highlightbackground=COR_GRADE)
         lq.pack(fill='x', padx=14, pady=(8, 6))
@@ -1322,15 +1496,16 @@ class App:
                     self._mapa_vars[nome].set(saida)
                 self.engine.set_mapa(mapa)
                 with self.engine._lock:
-                    self.engine._logs.append('mapa: %s → %s'
+                    self.engine._logs.append(_t('mapa: %s → %s')
                                              % (nome, saida))
             if fechar:
                 win.destroy()
 
         rodape = tk.Frame(quad, bg=COR_PAINEL)
         rodape.pack(fill='x', padx=14, pady=(2, 12))
-        self._botao(rodape, 'Aplicar', aplicar).pack(side='left')
-        self._botao(rodape, 'Cancelar', win.destroy).pack(side='right')
+        self._botao(rodape, _t('Aplicar'), aplicar).pack(side='left')
+        self._botao(rodape, _t('Cancelar'),
+                    win.destroy).pack(side='right')
         lb.bind('<Double-Button-1>', aplicar)
         lb.bind('<Return>', aplicar)
         lb.bind('<space>', aplicar)
@@ -1353,11 +1528,88 @@ class App:
         win.grab_set()
         win.focus_set()
         lb.focus_set()
+    _TEMA_LBL = staticmethod(lambda: {_t('Escuro'): 'escuro',
+                                      _t('Claro'): 'claro'})
+    _LANG_LBL = staticmethod(lambda: {_t('Português (Brasil)'): 'pt',
+                                      _t('English'): 'en'})
+
+    def _montar_ajustes(self):
+        """Aba 'Ajustes': só o que é do software (tema e idioma)."""
+        quad = ctk.CTkFrame(self._tab_ajustes, fg_color=COR_PAINEL2,
+                            corner_radius=10)
+        quad.pack(fill='x', padx=10, pady=(10, 6))
+        topo = ctk.CTkFrame(quad, fg_color='transparent')
+        topo.pack(fill='x', padx=12, pady=(12, 6))
+        ui = self.cfg.setdefault('ui', {'tema': 'escuro', 'idioma': 'pt'})
+        inv_tema = self._TEMA_LBL()
+        linha = ctk.CTkFrame(quad, fg_color='transparent')
+        linha.pack(fill='x', padx=12, pady=(0, 4))
+        ctk.CTkLabel(linha, text=_t('Tema'), text_color=COR_MUT,
+                     font=F_SUP).pack(side='left')
+        self._var_tema_ui = tk.StringVar(
+            value=next((lbl for lbl, k in inv_tema.items()
+                        if k == ui.get('tema')), list(inv_tema)[0]))
+        self._menu(linha, list(inv_tema), self._var_tema_ui,
+                   self._cb_tema).pack(side='left', padx=(10, 24))
+        inv_lang = self._LANG_LBL()
+        ctk.CTkLabel(linha, text=_t('Idioma'), text_color=COR_MUT,
+                     font=F_SUP).pack(side='left')
+        self._var_lang_ui = tk.StringVar(
+            value=next((lbl for lbl, k in inv_lang.items()
+                        if k == ui.get('idioma')), list(inv_lang)[0]))
+        self._menu(linha, list(inv_lang), self._var_lang_ui,
+                   self._cb_idioma).pack(side='left', padx=(10, 0))
+        ctk.CTkLabel(quad, text=_t('Escolhe tema/idioma; o app reinicia '
+                                   'para aplicar.'),
+                     text_color=COR_MUT, font=F_SUP) \
+            .pack(fill='x', padx=12, pady=(4, 12))
+
+    def _cb_tema(self, valor):
+        self.cfg.setdefault('ui', {})['tema'] = \
+            self._TEMA_LBL().get(valor, 'escuro')
+        self._reiniciar()
+
+    def _cb_idioma(self, valor):
+        self.cfg.setdefault('ui', {})['idioma'] = \
+            self._LANG_LBL().get(valor, 'pt')
+        self._reiniciar()
+
+    def _reiniciar(self):
+        """Salva e reabre o app — jeito 100% confiável de aplicar tema/
+        idioma (todos os desenhos usam os tokens da nova paleta)."""
+        try:
+            salvar_config(self.cfg)
+        except OSError:
+            pass
+        self.engine.encerrar()
+        try:
+            self.engine.join(timeout=1.0)
+        except RuntimeError:
+            pass
+        os.execl(sys.executable, sys.executable,
+                 os.path.realpath(sys.argv[0]))
+
+    def _ajustar_minsize(self):
+        """Ninguém encolhe o app abaixo do tamanho que mantém o texto
+        dos botões do header e o conteúdo da aba visíveis."""
+        try:
+            self.root.update_idletasks()
+            larg = max(1000,
+                       self._barra_top.winfo_reqwidth() + 26,
+                       self._tabs.winfo_reqwidth() + 26)
+            alt = max(640,
+                      self._barra_top.winfo_reqheight() +
+                      self.canv.winfo_reqheight() + 236 +
+                      self.txt_logs.winfo_reqheight())
+            self.root.minsize(larg, alt)
+        except Exception:
+            pass
+
     def _montar_presets(self):
         quad = ctk.CTkFrame(self._tab_presets, fg_color=COR_PAINEL2,
                             corner_radius=10)
         quad.pack(fill='x', padx=10, pady=(10, 6))
-        ctk.CTkLabel(quad, text='PRESETS DE CONFIGURAÇÃO',
+        ctk.CTkLabel(quad, text=_t('PRESETS DE CONFIGURAÇÃO'),
                      font=F_TIT, text_color=COR_MUT).pack(
             anchor='w', padx=12, pady=(12, 4))
         linha = ctk.CTkFrame(quad, fg_color='transparent')
@@ -1369,11 +1621,12 @@ class App:
             self._cb_preset)
         self._preset_combo.configure(width=260)
         self._preset_combo.pack(side='left')
-        self._botao(linha, 'Salvar como preset…',
+        self._botao(linha, _t('Salvar como preset…'),
                     self._preset_salvar).pack(side='left', padx=(10, 6))
-        self._botao(linha, 'Excluir preset',
+        self._botao(linha, _t('Excluir preset'),
                     self._preset_excluir).pack(side='left', padx=6)
-        ctk.CTkLabel(linha, text='selecionar na lista carrega a config na hora',
+        ctk.CTkLabel(linha,
+                     text=_t('selecionar na lista carrega a config na hora'),
                      text_color=COR_MUT, font=F_SUP).pack(
             anchor='w', padx=(10, 0))
 
@@ -1417,9 +1670,9 @@ class App:
 
     def _restaurar_padroes(self):
         if not messagebox.askyesno(
-                'Restaurar padrões',
-                'Volta direção, sensor, volante, mapa de botões e o modo do '
-                'dispositivo para os padrões de fábrica?'):
+                _t('Restaurar padrões?'),
+                _t('Volta direção, sensor, volante, mapa de botões e o '
+                   'modo do dispositivo para os padrões de fábrica?')):
             return
         nova = copy.deepcopy(M.DEFAULTS)
         # trocas de uma chave só (atômicas p/ a thread do motor, que lê
@@ -1432,11 +1685,13 @@ class App:
         self._aplicar_cfg_ui()
         self.engine.reconectar()   # recalibra com as notas de fábrica
         with self.engine._lock:
-            self.engine._logs.append('config restaurada para os padrões')
+            self.engine._logs.append(
+                _t('config restaurada para os padrões'))
 
     def _preset_salvar(self):
         nome = simpledialog.askstring(
-            'Salvar preset', 'Nome do preset (vai para a lista):',
+            _t('Salvar preset'),
+            _t('Nome do preset (vai para a lista):'),
             parent=self.root)
         if nome is None:
             return
@@ -1445,18 +1700,19 @@ class App:
             return
         caminho = preset_path(nome)
         if os.path.exists(caminho) and not messagebox.askyesno(
-                'Salvar preset', 'Preset "%s" já existe. Sobrescrever?' % nome):
+                _t('Salvar preset'),
+                _t('Preset "%s" já existe. Sobrescrever?') % nome):
             return
         try:
             salvar_config(self.cfg, caminho)
         except OSError as e:
             with self.engine._lock:
-                self.engine._logs.append('erro ao salvar preset: %s' % e)
+                self.engine._logs.append(_t('erro ao salvar preset: %s') % e)
             return
         self._preset_combo.configure(values=presets_lista() or ['—'])
         self._var_preset.set(nome)
         with self.engine._lock:
-            self.engine._logs.append('preset "%s" salvo' % nome)
+            self.engine._logs.append(_t('preset "%s" salvo') % nome)
 
     def _cb_preset(self, _ev=None):
         nome = self._var_preset.get()
@@ -1468,14 +1724,14 @@ class App:
         self._aplicar_cfg_ui()
         self.engine.reconectar()   # recalibra com a config do preset
         with self.engine._lock:
-            self.engine._logs.append('preset "%s" carregado' % nome)
+            self.engine._logs.append(_t('preset "%s" carregado') % nome)
 
     def _preset_excluir(self):
         nome = self._var_preset.get()
         if not nome or nome == '—':
             return
-        if not messagebox.askyesno('Excluir preset',
-                                   'Apagar o preset "%s"?' % nome):
+        if not messagebox.askyesno(_t('Excluir preset?'),
+                                   _t('Apagar o preset "%s"?' % nome)):
             return
         try:
             os.remove(preset_path(nome))
@@ -1484,7 +1740,7 @@ class App:
         self._var_preset.set('—')
         self._preset_combo.configure(values=presets_lista() or ['—'])
         with self.engine._lock:
-            self.engine._logs.append('preset "%s" excluído' % nome)
+            self.engine._logs.append(_t('preset "%s" excluído') % nome)
 
     def _montar_logs(self):
         quad = ctk.CTkFrame(self.root, fg_color=COR_PAINEL, corner_radius=10,
@@ -1550,6 +1806,13 @@ class App:
         mapa[nome] = var.get()
         self.engine.set_mapa(mapa)
 
+    def _cb_ajustes(self):
+        """Botão de engrenagem do header: muda para a aba de ajustes."""
+        try:
+            self._tabs.set(self._tab_ajustes_nome)
+        except Exception:
+            pass
+
     def _cb_ignorar(self):
         """Botão: o jogo deixa de ver (ou volta a ver) o DualSense físico.
         Captura exclusiva evdev — sem root, reversível no toggle e em
@@ -1562,7 +1825,7 @@ class App:
         if eng.is_alive():
             eng.encerrar()
             eng.join(timeout=2.5)
-            self.btn_motor.configure(text='LIGAR MOTOR', fg_color=COR_OK,
+            self.btn_motor.configure(text=_t('LIGAR MOTOR'), fg_color=COR_OK,
                                      hover_color='#008a4c')
         else:
             novo = Engine(self.cfg)
@@ -1570,7 +1833,7 @@ class App:
                 novo._grab_quer = True
                 novo.state['ignorar'] = True
             self.engine = novo
-            self.btn_motor.configure(text='PARAR MOTOR', fg_color=COR_ACAO,
+            self.btn_motor.configure(text=_t('PARAR MOTOR'), fg_color=COR_ACAO,
                                      hover_color=COR_HOVER)
             novo.start()
 
@@ -1578,10 +1841,11 @@ class App:
         try:
             salvar_config(self.cfg)
             with self.engine._lock:
-                self.engine._logs.append('config salva em %s' % CONF_PATH)
+                self.engine._logs.append(_t('config salva em %s')
+                                         % CONF_PATH)
         except OSError as e:
             with self.engine._lock:
-                self.engine._logs.append('erro ao salvar: %s' % e)
+                self.engine._logs.append(_t('erro ao salvar: %s') % e)
 
     def _fechar(self):
         self.engine.encerrar()
@@ -1642,7 +1906,10 @@ class App:
                 pass
 
     def _atualizar_texto(self, st):
-        self.lbl_status.configure(text=st['status'], text_color=st['cor'])
+        txt_st = st['status']
+        if len(txt_st) > 34:
+            txt_st = txt_st[:33] + '…'
+        self.lbl_status.configure(text=txt_st, text_color=st['cor'])
         disp = self.engine.cfg.get('dispositivo', {}).get('modo', 'xbox')
         extra = ' · %s · %s (%s)' % (
             st['hidraw'], Steer.PERFIL.get(disp, Steer.PERFIL['xbox'])['name'],
@@ -1660,7 +1927,7 @@ class App:
         pr = st.get('pedal_rest', (0.0, 0.0))
         if pr and hasattr(self, 'lbl_pedais'):
             self.lbl_pedais.configure(
-                text='repouso: freio %.0f / acel %.0f (subtraído)'
+                text=_t('repouso: freio %.0f / acel %.0f (subtraído)')
                      % (pr[0], pr[1]))
         logs = self.engine.logs()
         self.txt_logs.config(state='normal')
@@ -1814,7 +2081,13 @@ def main():
     ap = argparse.ArgumentParser(description='GUI do tilt2drive')
     ap.add_argument('--selftest', action='store_true')
     args = ap.parse_args()
+    ui = ler_ui(CONF_LER)
+    global LINGUA
+    LINGUA = ui['idioma'] if ui['idioma'] in ('pt', 'en') else 'pt'
+    _aplicar_tokens(ui['tema'])
+    ctk.set_appearance_mode('light' if TEMA_ATIVO == 'claro' else 'dark')
     cfg = M.load_cfg(CONF_LER)
+    cfg['ui'] = ui
     app = App(cfg)
     if args.selftest:
         for _ in range(8):

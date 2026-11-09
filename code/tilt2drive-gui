@@ -22,10 +22,17 @@ import select
 import sys
 import threading
 import time
+import glob
+import fcntl
+import struct
 from collections import deque
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog
 from importlib.machinery import SourceFileLoader
+
+# ioctl para tomada exclusiva de um node evdev (o kernel solta
+# sozinho quando o fd fecha — reversível por construção)
+EVIOCGRAB = 0x40044590
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _SCRIPT = os.path.realpath(os.path.join(_HERE, 'tilt2drive'))
@@ -133,6 +140,9 @@ class Engine(threading.Thread):
         self._trocar_modo = False
         self._steer = None
         self._lock = threading.Lock()
+        self._grab_quer = False    # o jogo deve ignorar o controle físico?
+        self._grab_fds = []        # fds evdev capturados com EVIOCGRAB
+        self._grab_caminho = ''    # hidraw vigente quando o grab foi feito
         self._nrep = 0
         self.state = {
             'status': 'iniciando...', 'cor': COR_MUT, 'hidraw': '',
@@ -145,6 +155,103 @@ class Engine(threading.Thread):
         }
         self._logs = deque(maxlen=8)
         M.log = self._module_log   # captura os logs do módulo (calibração etc.)
+
+    # ---- jogo ignora o controle físico (EVIOCGRAB nos evdev) ----
+    def set_ignorar(self, val):
+        """Liga/desliga o modo "o jogo ignora o controle original".
+
+        Como funciona: abre os nodes evdev do DualSense em SO LEITURA e
+        toma a posse com EVIOCGRAB — nenhum outro processo (jogo, Steam)
+        recebe mais eventos do controle físico, enquanto este motor segue
+        lendo o hidraw normalmente. Reversível por construção: os fds
+        fecham no desligar, no fechar do app ou até em queda, e o KERNEL
+        solta o grab automaticamente. Sem escrita, sem udev, sem root."""
+        val = bool(val)
+        with self._lock:
+            self._grab_quer = val
+            self.state['ignorar'] = val
+            hid = self.state.get('hidraw', '')
+        if val:
+            n = self._grab_renovar(hid)
+            msg = ('jogo vai ignorar o controle físico: %d node(s) '
+                   'capturado(s)' % n if n else
+                   'ignorar: nenhum node do DualSense capturado — controle '
+                   'presente?')
+            with self._lock:
+                self._logs.append(msg)
+        else:
+            n = self._grab_soltar()
+            if n:
+                with self._lock:
+                    self._logs.append('controle físico devolvido ao '
+                                      'sistema (%d node(s))' % n)
+
+    def _grab_renovar(self, hid_atual):
+        """Refaz a captura (fecha os fds antigos e reabre os nodes atuais)."""
+        self._grab_soltar()
+        fds = self._grab_segurar()
+        with self._lock:
+            self._grab_fds = fds
+            self._grab_caminho = hid_atual or self._grab_caminho
+        return len(fds)
+
+    def _grab_soltar(self):
+        """Fecha os fds capturados: o kernel libera o EVIOCGRAB sozinho."""
+        with self._lock:
+            fds = self._grab_fds
+            self._grab_fds = []
+        n = 0
+        for fd in fds:
+            try:
+                os.close(fd)
+                n += 1
+            except OSError:
+                pass
+        return n
+
+    def _grab_segurar(self):
+        """Enumera os nodes evdev do DualSense (vendor 054c) e captura."""
+        achados = []
+        for node in sorted(glob.glob('/dev/input/event[0-9]*')):
+            devdir = os.path.join('/sys/class/input',
+                                  os.path.basename(node), 'device')
+            try:
+                with open(os.path.join(devdir, 'name'), encoding='utf-8',
+                          errors='replace') as fh:
+                    if 'DualSense Wireless Controller' not in fh.read():
+                        continue
+                with open(os.path.join(devdir, 'device', 'id', 'vendor'),
+                          encoding='ascii') as fh:
+                    if int(fh.read().strip(), 16) != 0x054C:
+                        continue
+            except (OSError, ValueError):
+                continue
+            fd = None
+            try:
+                fd = os.open(node, os.O_RDONLY | os.O_NONBLOCK |
+                             os.O_CLOEXEC)
+                fcntl.ioctl(fd, EVIOCGRAB, 1, True)
+            except OSError:
+                if fd is not None:
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                continue
+            achados.append(fd)
+        return achados
+
+    def _grab_renovar_se(self, path_atual):
+        """Loop do motor chama ao (re)abrir o hidraw: se 'ignorar' on e o
+        dispositivo trocou, refaz a captura dos novos nodes."""
+        with self._lock:
+            precisa = self._grab_quer and self._grab_caminho != path_atual
+        if not precisa:
+            return
+        n = self._grab_renovar(path_atual)
+        with self._lock:
+            self._logs.append('grab renovado p/ o novo device: %d node(s)'
+                              % n)
 
     # ---- comunicação com a GUI ----
     def _module_log(self, msg='', end='\n'):
@@ -240,6 +347,7 @@ class Engine(threading.Thread):
 
     def encerrar(self):
         self._stop = True
+        self._grab_soltar()
 
     # ---- internos ----
     def _wait(self, seconds):
@@ -317,6 +425,7 @@ class Engine(threading.Thread):
                     self._steer = steer
                     self._pub_eixos(sensor)
                     self.status('ativo: %s' % path, COR_OK)
+                    self._grab_renovar_se(path)
                     ultima = time.monotonic()
                 if self._trocar_modo:
                     self._trocar_modo = False
@@ -621,6 +730,9 @@ class App:
                     self.engine.reconectar).pack(side='right', padx=(6, 0))
         self._botao(bar, 'Recalibrar',
                     self.engine.recalibrar).pack(side='right', padx=(6, 0))
+        self._btn_ignorar = self._botao(
+            bar, 'Ignorar controle original: desligado', self._cb_ignorar)
+        self._btn_ignorar.pack(side='right', padx=(6, 0))
 
     def _montar_canvas(self):
         frame = tk.Frame(self.root, bg=COR_PAINEL, highlightthickness=1,
@@ -1387,6 +1499,13 @@ class App:
         mapa[nome] = var.get()
         self.engine.set_mapa(mapa)
 
+    def _cb_ignorar(self):
+        """Botão: o jogo deixa de ver (ou volta a ver) o DualSense físico.
+        Captura exclusiva evdev — sem root, reversível no toggle e em
+        qualquer queda (kernel libera quando o fd fecha)."""
+        novo = not bool(self.engine._grab_quer)
+        self.engine.set_ignorar(novo)
+
     def _toggle_motor(self):
         eng = self.engine
         if eng.is_alive():
@@ -1395,6 +1514,9 @@ class App:
             self.btn_motor.config(text='Ligar motor')
         else:
             novo = Engine(self.cfg)
+            if eng._grab_quer:          # modo "ignorar" sobrevive à religada
+                novo._grab_quer = True
+                novo.state['ignorar'] = True
             self.engine = novo
             self.btn_motor.config(text='Parar motor')
             novo.start()
@@ -1423,6 +1545,15 @@ class App:
         self._desenhar()
         self._atualizar_texto(st)
         self._realce_botoes(st.get('botoes'), st.get('virtual'))
+        ign = bool(st.get('ignorar'))
+        if getattr(self, '_ignorar_ultimo', None) is not ign:
+            self._ignorar_ultimo = ign
+            try:
+                self._btn_ignorar.config(
+                    text='Ignorar controle original: %s'
+                         % ('LIGADO (jogo não vê)' if ign else 'desligado'))
+            except Exception:
+                pass
         self.root.after(33, self._tick)
 
     def _realce_botoes(self, ativos, ligado):

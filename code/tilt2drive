@@ -1,0 +1,972 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+tilt2drive — usa o giroscópio do DualSense (Bluetooth/USB) como eixo de direção
+para o F1 25 (ou qualquer jogo que aceite eixo analógico).
+
+- Lê os relatórios HID do controle pelo /dev/hidraw. SOMENTE LEITURA:
+  nada é escrito de volta ao DualSense (sem LED, vibração ou comandos).
+- Detecta automaticamente accel/gyro e calibra o neutro no início.
+- Estima o ângulo de inclinação (roll) com filtro complementar
+  (giroscópio integra rápido, acelerômetro corrige a deriva).
+- Publica o ângulo como eixo analógico ABS_X de um volante virtual
+  criado com uinput — Steam/Proton entregam esse eixo ao F1 25.
+
+Uso:
+  tilt2drive              # conversor com HUD no terminal
+  tilt2drive --debug      # modo diagnóstico (valores crus do sensor)
+
+Configuração: ~/.config/tilt2drive.conf (migra do motion-f1.conf)
+"""
+import argparse
+import configparser
+import copy
+import fcntl
+import math
+import os
+import select
+import struct
+import sys
+import time
+
+# --- constantes uinput -------------------------------------------------------
+UI_SET_EVBIT   = 0x40045564
+UI_SET_KEYBIT  = 0x40045565
+UI_SET_ABSBIT  = 0x40045567
+UI_DEV_CREATE  = 0x5501
+UI_DEV_DESTROY = 0x5502
+EV_ABS, EV_KEY = 0x03, 0x01
+# eixos (mesma numeração do driver xpad/Xbox)
+ABS_X, ABS_Y, ABS_Z = 0x00, 0x01, 0x02
+ABS_RX, ABS_RY, ABS_RZ = 0x03, 0x04, 0x05
+ABS_HAT0X, ABS_HAT0Y = 0x10, 0x11
+# botões Xbox
+BTN_SOUTH, BTN_EAST, BTN_NORTH, BTN_WEST = 0x130, 0x131, 0x133, 0x134
+BTN_TL, BTN_TR, BTN_THUMBL, BTN_THUMBR = 0x136, 0x137, 0x13D, 0x13E
+BTN_SELECT, BTN_START, BTN_MODE = 0x15A, 0x15B, 0x13C
+# família de botões de joystick (a que o Logitech G27 real emite)
+BTN_TRIGGER, BTN_THUMB, BTN_THUMB2 = 0x120, 0x121, 0x122
+BTN_TOP, BTN_TOP2, BTN_PINKIE = 0x123, 0x124, 0x125
+BTN_BASE, BTN_BASE2, BTN_BASE3 = 0x126, 0x127, 0x128
+BTN_BASE4, BTN_BASE5, BTN_BASE6 = 0x129, 0x12A, 0x12B
+# teclas que o mini-teclado virtual usa para navegar menus do F1 25
+KEY_ESC, KEY_TAB, KEY_ENTER = 1, 15, 28
+KEY_UP, KEY_DOWN, KEY_LEFT, KEY_RIGHT = 103, 108, 105, 106
+INPUT_EVENT = '=QQHHi'   # struct do input_event no Linux x86_64
+
+# nibble do dpad no DualSense -> (hat0x, hat0y), ordem do kernel
+DS_HAT = ((0, -1), (1, -1), (1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, 0))
+# offset do início da struct dualsense_input_report no relatório cru
+DS_BASE = {0x31: 2, 0x01: 1}   # Bluetooth, USB
+
+DEFAULTS = {
+    'direcao': {
+        'modo': 'angulo',          # 'angulo' (inclinou X graus = X% de esterço) ou 'taxa'
+        'angulo_max': 45.0,        # graus de inclinação = esterçada total
+        'zona_morta': 1.0,         # graus ignorados perto do neutro
+        'suavizacao_tau': 0.03,    # filtro exponencial em segundos (0 = off)
+        'taxa_giro_total': 90.0,   # modo taxa: graus/s para esterçada total
+        'inverter': 1.0,           # -1 se a direção sair espelhada no jogo
+        'curva': 1.0,              # expoente sobre o esterço normalizado:
+                                   # 1.0 = linear; >1 = começa suave (mais
+                                   # precisão no inicio da inclinacao); <1 =
+                                   # agressivo (incluir pouco ja vira muito)
+    },
+    # condução INDEPENDENTE do modo volante (não toca na do controle)
+    'direcao_volante': {
+        'modo': 'angulo',
+        'angulo_max': 45.0,
+        'zona_morta': 1.0,
+        'suavizacao_tau': 0.03,
+        'taxa_giro_total': 90.0,
+        'inverter': 1.0,
+        'curva': 1.0,
+    },
+    'sensor': {
+        'gyro_dps_por_lsb': 0.0009765625,  # 1/1024 (DS_GYRO_RES_PER_DEG_S do kernel)
+        'peso_accelerometro': 0.02,
+        'eixo_vert': -1,           # -1 = detectar automaticamente
+        'eixo_lat': -1,
+        'eixo_giro': -1,           # -1 = auto (detecta e pode guardar);
+                                   # 0/1/2 = eixo fixo (x/y/z), sem balanço
+        'sinal_giro': 1.0,         # sinal detectado (persistível)
+        'salvar_calibracao': 1,    # 1 = guarda eixo/sinal/escala detectados
+                                   #     na config (pula o balanço na próxima)
+    },
+    'dispositivo': {
+        'modo': 'xbox',            # 'xbox' (gamepad completo) ou 'volante'
+    },
+    'volante': {
+        'gir_max': 900.0,          # rotação total do volante virtual (graus)
+        'freio_zona_morta': 20.0,  # curso morto do freio L2 em repouso (0-80)
+        'acel_zona_morta': 20.0,   # curso morto do acelerador R2 (0-80)
+        'freio_curva': 1.0,        # >1 = mais curso no pé leve; <1 = no fundo
+        'acel_curva': 1.0,
+        'freio_repouso': 0.0,      # valor do gatilho em repouso (auto-medido)
+        'acel_repouso': 0.0,
+        # legados (migração de configs antigas):
+        'pedal_zona_morta': 0.0,
+        'pedal_curva': 1.0,
+    },
+    'mapa_botoes': {
+        'cruz': 'a', 'circulo': 'b', 'quadrado': 'x', 'triangulo': 'y',
+        'l1': 'lb', 'r1': 'rb', 'create': 'back', 'options': 'start',
+        'l3': 'ls', 'r3': 'rs', 'ps': 'guide', 'touchpad': 'none',
+        'cima': 'up', 'baixo': 'down', 'esquerda': 'left', 'direita': 'right',
+    },
+}
+
+
+def log(msg='', end='\n'):
+    print(msg, end=end, flush=True)
+
+
+def cfg_direcao(cfg):
+    """Seção de condução ativa, conforme o modo do dispositivo."""
+    if cfg.get('dispositivo', {}).get('modo') == 'volante' \
+            and 'direcao_volante' in cfg:
+        return cfg['direcao_volante']
+    return cfg['direcao']
+
+
+# ---------------------------------------------------------------------------
+# dispositivo virtual (uinput)
+# ---------------------------------------------------------------------------
+class Steer:
+    """Dispositivo virtual (uinput), somente alimentado pela leitura do DualSense.
+
+    Perfis (cfg['dispositivo']['modo']):
+      'xbox'    - gamepad completo estilo Xbox 360 (sticks, gatilhos, dpad, botões);
+      'volante' - device de volante pedido por nome ("Racing Wheel"; o F1 25 e o
+                  Wine classificam por nome): ABS_X = direção de verdade,
+                  ABS_Y = freio, ABS_Z = acelerador - sem caminho de stick,
+                  com retorno ao centro imediato.
+
+    cfg['mapa_botoes']: cada entrada do DualSense -> saída do device virtual
+    ('a','b','x','y','lb','rb','back','start','ls','rs','guide',
+     'up','down','left','right' ou 'none' = desconectado)."""
+
+    PERFIL = {
+        'xbox': {
+            'name': 'Tilt2Drive Gyro Wheel',
+            'bus': 0x03, 'vid': 0x045E, 'pid': 0x028E, 'ver': 0x0114,
+            'eixos': {ABS_X: (-32768, 32767), ABS_Y: (-32768, 32767),
+                      ABS_RX: (-32768, 32767), ABS_RY: (-32768, 32767),
+                      ABS_Z: (0, 255), ABS_RZ: (0, 255),
+                      ABS_HAT0X: (-1, 1), ABS_HAT0Y: (-1, 1)},
+        },
+        'volante': {
+            # assinatura clássica de volante (Logitech G25) - Wine/F1 enxergam wheel
+            'name': 'Tilt2Drive Racing Wheel',
+            'bus': 0x03, 'vid': 0x046D, 'pid': 0xC29B, 'ver': 0x0110,
+            'eixos': {ABS_X: (-32768, 32767),          # direção
+                      ABS_Y: (0, 1023),                # freio
+                      ABS_Z: (0, 1023),                # acelerador
+                      ABS_HAT0X: (-1, 1), ABS_HAT0Y: (-1, 1)},
+        },
+    }
+
+    # saídas possíveis do device virtual (xbox / teclas do teclado p/ menus)
+    SAIDAS = ('a', 'b', 'x', 'y', 'lb', 'rb', 'back', 'start', 'ls', 'rs',
+              'guide', 'up', 'down', 'left', 'right', 'none',
+              'w1', 'w2', 'w3', 'w4', 'w5', 'w6', 'w7', 'w8', 'w9', 'w10',
+              'w11', 'w12', 'enter', 'esc', 'k_up', 'k_down', 'k_left',
+              'k_right')
+    _BOTAO = {
+        'a': (EV_KEY, BTN_SOUTH), 'b': (EV_KEY, BTN_EAST),
+        'x': (EV_KEY, BTN_NORTH), 'y': (EV_KEY, BTN_WEST),
+        'lb': (EV_KEY, BTN_TL), 'rb': (EV_KEY, BTN_TR),
+        'back': (EV_KEY, BTN_SELECT), 'start': (EV_KEY, BTN_START),
+        'ls': (EV_KEY, BTN_THUMBL), 'rs': (EV_KEY, BTN_THUMBR),
+        'guide': (EV_KEY, BTN_MODE),
+    }
+    # família 0x120: os códigos que um G27 real emite (F1 25 mapeia por código)
+    _BOTAO_W = {
+        'w1': BTN_TRIGGER, 'w2': BTN_THUMB, 'w3': BTN_THUMB2,
+        'w4': BTN_TOP, 'w5': BTN_TOP2, 'w6': BTN_PINKIE,
+        'w7': BTN_BASE, 'w8': BTN_BASE2, 'w9': BTN_BASE3,
+        'w10': BTN_BASE4, 'w11': BTN_BASE5, 'w12': BTN_BASE6,
+    }
+    # teclas reais: F1 25 navega menus por teclado sempre
+    _K_TECLA = {'enter': KEY_ENTER, 'esc': KEY_ESC,
+                'k_up': KEY_UP, 'k_down': KEY_DOWN,
+                'k_left': KEY_LEFT, 'k_right': KEY_RIGHT}
+
+    # entradas do DualSense: nome -> (byte relativo ao base, máscara)
+    ENTRADAS = (
+        ('quadrado', 0, 0x10), ('cruz', 0, 0x20),
+        ('circulo', 0, 0x40), ('triangulo', 0, 0x80),
+        ('l1', 1, 0x01), ('r1', 1, 0x02),
+        ('create', 1, 0x10), ('options', 1, 0x20),
+        ('l3', 1, 0x40), ('r3', 1, 0x80),
+        ('ps', 2, 0x01), ('touchpad', 2, 0x02),
+    )
+    DS_NAMES = tuple(n for n, _, _ in ENTRADAS) + \
+        ('cima', 'baixo', 'esquerda', 'direita')
+
+    MAPA_PADRAO = {
+        'cruz': 'a', 'circulo': 'b', 'quadrado': 'x', 'triangulo': 'y',
+        'l1': 'lb', 'r1': 'rb', 'create': 'back', 'options': 'start',
+        'l3': 'ls', 'r3': 'rs', 'ps': 'guide', 'touchpad': 'none',
+        'cima': 'up', 'baixo': 'down', 'esquerda': 'left', 'direita': 'right',
+    }
+
+    def __init__(self, modo='xbox', mapa=None, volante=None):
+        self.modo = modo if modo in self.PERFIL else 'xbox'
+        self._pedais = {
+            # pedal: (zona_morta, curva, repouso)
+            'freio': (20.0, 1.0, 0.0),
+            'acel': (20.0, 1.0, 0.0),
+        }
+        if isinstance(volante, dict):
+            self.set_pedais(volante.get('freio_zona_morta', 20.0),
+                            volante.get('freio_curva', 1.0),
+                            volante.get('acel_zona_morta', 20.0),
+                            volante.get('acel_curva', 1.0),
+                            volante.get('freio_repouso', 0.0),
+                            volante.get('acel_repouso', 0.0))
+        self.set_mapa(mapa)
+
+    def set_pedais(self, freio_dz=20.0, freio_curva=1.0, acel_dz=20.0,
+                   acel_curva=1.0, freio_rep=0.0, acel_rep=0.0):
+        """Ajuste dos pedais do modo volante (zona morta, curva, repouso)."""
+        def clamp(dz, curva, rep):
+            return (max(0.0, min(120.0, float(dz))),
+                    max(0.3, min(3.0, float(curva))),
+                    max(0.0, min(120.0, float(rep))))
+        self._pedais = {
+            'freio': clamp(freio_dz, freio_curva, freio_rep),
+            'acel': clamp(acel_dz, acel_curva, acel_rep),
+        }
+
+    def set_mapa(self, mapa=None):
+        """Redefine o mapa de botões ao vivo (device não precisa ser recriado)."""
+        mapping = dict(self.MAPA_PADRAO)
+        if isinstance(mapa, dict):
+            for k, v in mapa.items():
+                if k in self.DS_NAMES and v in self.SAIDAS:
+                    mapping[k] = v
+        self.mapping = mapping
+        self._rev = {}          # saída -> entradas do DualSense que a disparam
+        for ds, saida in mapping.items():
+            if saida in self._BOTAO or saida in self._BOTAO_W:
+                self._rev.setdefault(saida, []).append(ds)
+        self._hat_in = {'up': [], 'down': [], 'left': [], 'right': []}
+        for ds, saida in mapping.items():
+            if saida in self._hat_in:
+                self._hat_in[saida].append(ds)
+
+        p = self.PERFIL[self.modo]
+        self._eixos = p['eixos']
+        self._botoes = tuple(self._BOTAO[k][1] for k in self._BOTAO) + \
+            tuple(self._BOTAO_W[k] for k in self._BOTAO_W)
+        self.fd = os.open('/dev/uinput', os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            fcntl.ioctl(self.fd, UI_SET_EVBIT, EV_KEY, True)
+            fcntl.ioctl(self.fd, UI_SET_EVBIT, EV_ABS, True)
+            for code in self._eixos:
+                fcntl.ioctl(self.fd, UI_SET_ABSBIT, code, True)
+            for code in self._botoes:
+                fcntl.ioctl(self.fd, UI_SET_KEYBIT, code, True)
+            self._create_dev(p)
+        except Exception:
+            os.close(self.fd)
+            raise
+        self._state = {}
+
+    def _create_dev(self, p):
+        # struct uinput_user_dev: name[80], input_id(4x u16), ff_effects_max(u32),
+        # absmax[64], absmin[64], absfuzz[64], absflat[64]
+        pack = '=80sHHHHI' + '64i' * 4
+        absmax = [0] * 64
+        absmin = [0] * 64
+        fuzz = [0] * 64
+        flat = [0] * 64
+        for code, (lo, hi) in self._eixos.items():
+            absmin[code] = lo
+            absmax[code] = hi
+            fuzz[code] = 8
+            if code in (ABS_X, ABS_Y, ABS_Z, ABS_RX, ABS_RY, ABS_RZ):
+                flat[code] = 4            # centro limpo (evita jitter)
+        data = struct.pack(pack, p['name'].encode('utf-8')[:78].ljust(80, b'\0'),
+                           p['bus'], p['vid'], p['pid'], p['ver'], 0,
+                           *absmax, *absmin, *fuzz, *flat)
+        os.write(self.fd, data)
+        ret = fcntl.ioctl(self.fd, UI_DEV_CREATE, struct.pack('i', 0), True)
+        if isinstance(ret, bytes):
+            ret = struct.unpack('i', ret[:4])[0]
+        if ret != 0:
+            raise OSError('UI_DEV_CREATE falhou (%s)' % ret)
+
+    def _ev(self, eventos, tipo, cod, val):
+        if self._state.get((tipo, cod)) != val:
+            self._state[(tipo, cod)] = val
+            eventos.extend(struct.pack(INPUT_EVENT, 0, 0, tipo, cod, val))
+
+    def emit(self, value):
+        ev = bytearray()
+        self._ev(ev, EV_ABS, ABS_X, value)
+        if ev:
+            try:
+                os.write(self.fd, bytes(ev)
+                         + struct.pack(INPUT_EVENT, 0, 0, 0, 0, 0))
+            except OSError:
+                pass
+
+    def feed(self, buf, steer_value, base):
+        """Reposta o estado completo do DualSense (via mapa) + direção do giroscópio."""
+        b = buf
+        apert = {}
+        for nome, nbyte, mask in self.ENTRADAS:
+            apert[nome] = bool(b[base + 7 + nbyte] & mask)
+        apert.setdefault('cima', False)
+        apert.setdefault('baixo', False)
+        apert.setdefault('esquerda', False)
+        apert.setdefault('direita', False)
+        nib = b[base + 7] & 0x0F
+        hatx, haty = DS_HAT[nib] if nib < len(DS_HAT) else (0, 0)
+        apert['cima'] |= haty < 0
+        apert['baixo'] |= haty > 0
+        apert['esquerda'] |= hatx < 0
+        apert['direita'] |= hatx > 0
+
+        ev = bytearray()
+        self._ev(ev, EV_ABS, ABS_X, steer_value)
+        if self.modo == 'xbox':
+            self._ev(ev, EV_ABS, ABS_Y, (b[base + 1] - 128) * 257)
+            self._ev(ev, EV_ABS, ABS_RX, (b[base + 2] - 128) * 257)
+            self._ev(ev, EV_ABS, ABS_RY, (b[base + 3] - 128) * 257)
+            self._ev(ev, EV_ABS, ABS_Z, b[base + 4])       # gatilho esquerdo
+            self._ev(ev, EV_ABS, ABS_RZ, b[base + 5])      # gatilho direito
+        else:  # volante: pedais analógicos (L2 = freio, R2 = acelerador)
+            self._ev(ev, EV_ABS, ABS_Y, self._pedal(b[base + 4], 'freio'))
+            self._ev(ev, EV_ABS, ABS_Z, self._pedal(b[base + 5], 'acel'))
+
+        # dpad virtual a partir do mapa (várias entradas podem mapear p/ cima etc.)
+        hx = hy = 0
+        for ds in self._hat_in['up']:
+            if apert[ds]:
+                hy = -1
+        for ds in self._hat_in['down']:
+            if apert[ds]:
+                hy = 1
+        for ds in self._hat_in['left']:
+            if apert[ds]:
+                hx = -1
+        for ds in self._hat_in['right']:
+            if apert[ds]:
+                hx = 1
+        self._ev(ev, EV_ABS, ABS_HAT0X, hx)
+        self._ev(ev, EV_ABS, ABS_HAT0Y, hy)
+
+        # botões: cada saída acesse se QUALQUER entrada mapeada para ela
+        for saida, (tipo, cod) in self._BOTAO.items():
+            if saida not in self._rev:
+                continue
+            val = 1 if any(apert[ds] for ds in self._rev[saida]) else 0
+            self._ev(ev, tipo, cod, val)
+        for saida, cod in self._BOTAO_W.items():
+            if saida not in self._rev:
+                continue
+            val = 1 if any(apert[ds] for ds in self._rev[saida]) else 0
+            self._ev(ev, EV_KEY, cod, val)
+        # teclas (menus do F1 25 respondem a teclado de teclado)
+        if any(s in self._K_TECLA for s in self._rev):
+            self._teclado_criar()
+            if self.kfd and self.kfd > 0:
+                kv = bytearray()
+                for saida, cod in self._K_TECLA.items():
+                    if saida not in self._rev:
+                        continue
+                    val = 1 if any(apert[ds] for ds in self._rev[saida]) \
+                        else 0
+                    self._ev(kv, EV_KEY, cod, val)
+                if kv:
+                    try:
+                        os.write(self.kfd, bytes(kv)
+                                 + struct.pack(INPUT_EVENT, 0, 0, 0, 0,
+                                               0))
+                    except OSError:
+                        pass
+        if ev:
+            try:
+                os.write(self.fd, bytes(ev)
+                         + struct.pack(INPUT_EVENT, 0, 0, 0, 0, 0))
+            except OSError:
+                pass
+
+    def _teclado_criar(self):
+        """Mini device de teclado virtual (só as teclas de navegador)."""
+        if getattr(self, 'kfd', None):
+            return
+        fd = None
+        try:
+            fd = os.open('/dev/uinput',
+                         os.O_WRONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+            fcntl.ioctl(fd, UI_SET_EVBIT, EV_KEY, True)
+            for cod in self._K_TECLA.values():
+                fcntl.ioctl(fd, UI_SET_KEYBIT, cod, True)
+            zeros = [0] * 64
+            data = struct.pack('=80sHHHHI' + '64i' * 4,
+                               'Tilt2Drive Virtual Keys'.encode()[:78]
+                               .ljust(80, b'\0'), 0x03, 0x046D, 0xCAF1,
+                               0x0110, 0, *zeros, *zeros, *zeros, *zeros)
+            os.write(fd, data)
+            ret = fcntl.ioctl(fd, UI_DEV_CREATE, struct.pack('i', 0), True)
+            if isinstance(ret, bytes):
+                ret = struct.unpack('i', ret[:4])[0]
+            if ret != 0:
+                raise OSError('UI_DEV_CREATE falhou (%s)' % ret)
+            self.kfd = fd
+        except OSError:
+            if fd is not None:
+                os.close(fd)   # falhou: sem teclado (não fatal)
+            self.kfd = -1
+
+    def _pedal(self, raw, nome='acel'):
+        """Byte cru do gatilho (0-255) -> 0-1020 com repouso, zona morta e curva."""
+        dz, curva, rep = self._pedais.get(nome, (0.0, 1.0, 0.0))
+        v = raw - rep                    # gatilho em repouso vira 0
+        # piso absoluto: alguns valores de jitter do gatilho em repouso
+        # não podem sangrar gás/freio mesmo com zona morta do usuário em 0
+        dz = max(dz, 5.0)
+        if v <= dz:
+            return 0
+        curso = 255.0 - rep - dz         # curso útil restante
+        norm = (v - dz) / max(1.0, curso)
+        return int(min(1020, round((norm ** curva) * 1020.0)))
+
+    def reset(self):
+        self._state = {}       # força re-envio de todo o estado no próximo feed
+        self.emit(0)
+
+    def close(self):
+        try:
+            self.emit(0)
+            self._state = {}
+            fcntl.ioctl(self.fd, UI_DEV_DESTROY, struct.pack('i', 0), True)
+        finally:
+            os.close(self.fd)
+        kfd = getattr(self, 'kfd', None)
+        if kfd and kfd > 0:
+            try:
+                fcntl.ioctl(kfd, UI_DEV_DESTROY, struct.pack('i', 0), True)
+            except OSError:
+                pass
+            os.close(kfd)
+            self.kfd = None
+
+
+def botoes_apertados(buf, base):
+    """Nomes das entradas (DS_NAMES) pressionadas neste relatório."""
+    if len(buf) < base + 10:
+        return ()
+    apertados = [n for n, nb, mask in Steer.ENTRADAS
+                 if buf[base + 7 + nb] & mask]
+    nib = buf[base + 7] & 0x0F
+    if nib < len(DS_HAT):
+        hatx, haty = DS_HAT[nib]
+        if haty < 0:
+            apertados.append('cima')
+        elif haty > 0:
+            apertados.append('baixo')
+        if hatx < 0:
+            apertados.append('esquerda')
+        elif hatx > 0:
+            apertados.append('direita')
+    return tuple(apertados)
+
+
+# ---------------------------------------------------------------------------
+# descoberta do DualSense
+# ---------------------------------------------------------------------------
+def find_ds_hidraw():
+    base = '/sys/class/hidraw'
+    try:
+        names = sorted(os.listdir(base))
+    except OSError:
+        return None
+    for name in names:
+        uevent = os.path.join(base, name, 'device', 'uevent')
+        try:
+            with open(uevent) as fh:
+                txt = fh.read().upper()
+        except OSError:
+            continue
+        if not os.path.exists(os.path.join('/dev', name)):
+            continue
+        if ('054C' in txt and '0CE6' in txt) or 'DUALSENSE' in txt:
+            return os.path.join('/dev', name)
+    return None
+
+
+def open_ds_or_wait():
+    while True:
+        path = find_ds_hidraw()
+        if path:
+            try:
+                fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC)
+                log('DualSense encontrado em %s' % path)
+                return fd, path
+            except PermissionError:
+                log('Sem permissão para ler %s.' % path)
+                log('Rode com sudo: sudo tilt2drive')
+                sys.exit(1)
+        log('.', end='')
+        time.sleep(2)
+
+
+def read_reports(fd, seconds):
+    out, t0 = [], time.monotonic()
+    while time.monotonic() - t0 < seconds:
+        r, _, _ = select.select([fd], [], [], 0.25)
+        if not r:
+            continue
+        try:
+            data = os.read(fd, 256)
+        except (BlockingIOError, OSError):
+            continue
+        if not data:
+            break
+        out.append(data)
+    return out
+
+
+DS_KNOWN_LAYOUTS = {
+    # (rid, gyro_off, accel_off) — struct do relatório começa no byte 2 (BT) ou 1 (USB)
+    0x31: (17, 23),   # Bluetooth
+    0x01: (16, 22),   # USB
+}
+
+
+def find_sensor_block(reports):
+    """Acha o bloco de sensores. Retorna (rid, gyro_off, accel_off) ou None."""
+    # 1) layouts conhecidos do DualSense ( Drivers/hid/hid-playstation.c)
+    ids = {b[0] for b in reports}
+    for rid, (go, ao) in DS_KNOWN_LAYOUTS.items():
+        if rid in ids and all(len(b) >= ao + 8 for b in reports if b[0] == rid):
+            return rid, go, ao
+    # 2) fallback: vota em offsets, em qualquer ordem accel/gyro
+    votes = {}
+    for buf in reports:
+        if len(buf) < 48:
+            continue
+        for off in range(8, len(buf) - 12):
+            t1 = struct.unpack_from('3h', buf, off)
+            t2 = struct.unpack_from('3h', buf, off + 6)
+            m1 = math.sqrt(sum(v * v for v in t1))
+            m2 = math.sqrt(sum(v * v for v in t2))
+            # accel parado ~1g (8192 LSB/g); gyro parado ~0
+            if (4000.0 <= m1 <= 12000.0 and m2 < 3500.0) or \
+               (4000.0 <= m2 <= 12000.0 and m1 < 3500.0):
+                votes[(buf[0], off)] = votes.get((buf[0], off), 0) + 1
+    if not votes:
+        return None
+    (rid, off), _ = max(votes.items(), key=lambda kv: kv[1])
+    m1s = m2s = 0.0
+    n = 0
+    for buf in reports:
+        if len(buf) >= off + 12:
+            m1s += math.hypot(*struct.unpack_from('3h', buf, off))
+            m2s += math.hypot(*struct.unpack_from('3h', buf, off + 6))
+            n += 1
+    if m1s >= m2s:   # o triple maior é o acelerômetro (gravidade ~1g)
+        return rid, off + 6, off
+    return rid, off, off + 6
+
+
+# ---------------------------------------------------------------------------
+# sensor + filtro
+# ---------------------------------------------------------------------------
+class Sensor:
+    def __init__(self, s):
+        self.gyro_scale = s['gyro_dps_por_lsb']
+        self.fusao = s['peso_accelerometro']
+        self.gyro_axis = int(s.get('eixo_giro', -1))
+        self.inverter = s.get('inverter', 1.0)
+        self.gyro_sign = float(s.get('sinal_giro', 1.0))
+        self.pedal_rest = (0.0, 0.0)    # (freio, acel) medido em repouso
+
+        self.rid = None
+        self.gyro_off = None
+        self.accel_off = None
+        self.mag_ref = None
+        self.g0 = (0.0, 0.0, 0.0)          # gravidade de referência (neutro)
+        self.gyro_sign = 1.0
+        self.neutral_gyro = 0.0
+        self.angle = 0.0
+        self.dps = 0.0
+        self._out = 0.0
+        self._last_t = None
+
+    def _pair(self, buf):
+        accel = struct.unpack_from('3h', buf, self.accel_off)
+        gyro = struct.unpack_from('3h', buf, self.gyro_off)
+        return accel, gyro
+
+    def calibrate(self, fd):
+        log('')
+        log('CALIBRANDO — segure o controle parado, na posição de jogar...')
+        time.sleep(1)
+        still = read_reports(fd, 1.2)
+        if len(still) < 30:
+            raise RuntimeError('nenhum relatório recebido do controle')
+        blk = find_sensor_block(still)
+        if blk is None:
+            raise RuntimeError('não achei accel/gyro nos relatórios '
+                               '(rode com --debug para investigar)')
+        self.rid, self.gyro_off, self.accel_off = blk
+        filt = [b for b in still if len(b) >= self.accel_off + 12]
+        picked = [b for b in filt if b[0] == self.rid]
+        a_sum = [0.0, 0.0, 0.0]
+        n = 0
+        for b in picked:
+            accel, _ = self._pair(b)
+            for i in range(3):
+                a_sum[i] += accel[i]
+            n += 1
+        signed = [v / max(1, n) for v in a_sum]
+        self.g0 = tuple(signed)
+        self.mag_ref = math.sqrt(sum(v * v for v in signed))
+
+        # gatilhos em repouso (parado): subtraímos depois, senão o carro
+        # acelera/freia sozinho quando o gatilho não vale exatamente 0
+        base = DS_BASE.get(self.rid, 2)
+        pf = [b[base + 4] for b in picked if len(b) >= base + 6]
+        pa = [b[base + 5] for b in picked if len(b) >= base + 6]
+        if pf and pa:
+            self.pedal_rest = (sum(pf) / len(pf), sum(pa) / len(pa))
+
+        # fase de balanço: só quando o eixo NÃO está fixo nem guardado
+        wig = []
+        if self.gyro_axis < 0:
+            log('Agora mova o controle para os LADOS (faça de conta que '
+                'é um volante)...')
+            wig = [b for b in read_reports(fd, 2.2)
+                   if len(b) >= self.accel_off + 12 and b[0] == self.rid]
+        gyrs, accs = [], []
+        for b in wig:
+            accel, gyro = self._pair(b)
+            gyrs.append(gyro)
+            accs.append(accel)
+        # taxa de relatórios observada (para estimar escala do giroscópio)
+        ritmo = max(1.0, (len(still) + len(wig)) / 3.4)   # rel/s
+        if len(wig) > 20:
+            melhor = None
+            for axis in range(3):
+                angs = [self._roll_accel(a, axis) for a in accs]
+                rng = max(angs) - min(angs)
+                if rng < 8.0:
+                    continue
+                dan = [(angs[j] - angs[j - 1]) for j in range(1, len(angs))]
+                gv = [g[axis] for g in gyrs]
+                v1 = sum(x * x for x in dan)
+                v2 = sum(v * v for v in gv)
+                if v1 < 1e-6 or v2 < 1e-6:
+                    continue
+                corr = sum(a * b for a, b in zip(dan, gv)) / math.sqrt(v1 * v2)
+                if abs(corr) < 0.35:      # eixo errado tem correlação ~0
+                    continue
+                score = rng * abs(corr)
+                if melhor is None or score > melhor[3]:
+                    melhor = (axis, corr, rng, score)
+            if melhor:
+                axis, corr, rng, _ = melhor
+                if self.gyro_axis < 0:
+                    self.gyro_axis = axis
+                self.gyro_sign = 1.0 if corr >= 0 else -1.0
+                # escala: dângulo vs raw nos instantes de rotação forte
+                angs = [self._roll_accel(a, self.gyro_axis) for a in accs]
+                gv = [g[self.gyro_axis] for g in gyrs]
+                num = deno = 0.0
+                for j in range(1, len(angs)):
+                    if abs(gv[j]) > 800.0:
+                        num += (angs[j] - angs[j - 1]) * gv[j]
+                        deno += gv[j] * gv[j]
+                if deno > 0:
+                    esc = ritmo * num / deno
+                    if 1e-4 < esc < 0.02:
+                        self.gyro_scale = esc
+                log('Eixo de giro detectado: eixo%d (corr %+.2f, amplitude %.0f°, '
+                    'escala %.6f dps/LSB)' % (axis, corr, rng, self.gyro_scale))
+            else:
+                if self.gyro_axis >= 0:
+                    log('Eixo de giro fixado pelo config: eixo%d (sinal %+d) '
+                        '— sem necessidade de balançar.'
+                        % (self.gyro_axis, int(self.gyro_sign)))
+                else:
+                    log('Aviso: balanço fraco ou ambíguo — repita a calibração '
+                        'girando o controle mais para os lados.')
+        gv = [self._pair(b)[1][self.gyro_axis] for b in picked
+              if self.gyro_axis >= 0]
+        self.neutral_gyro = (sum(gv) / max(1, len(gv))) if gv else 0.0
+        self._last_t = time.monotonic()
+        log('Calibrado: accel@%d gyro@%d | eixo de giro=eixo%d (sinal %+d) | '
+            'escala %.6g dps/LSB | invert=%+g'
+            % (self.accel_off, self.gyro_off, self.gyro_axis,
+               int(self.gyro_sign), self.gyro_scale, self.inverter))
+        log('Pronto! HUD a seguir: incline o controle e veja o número.')
+
+    def _roll_accel(self, accel, axis):
+        """Ângulo (graus) da gravidade em torno do eixo `axis`, relativo ao neutro."""
+        g0 = self.g0
+        cx = g0[1] * accel[2] - g0[2] * accel[1]
+        cy = g0[2] * accel[0] - g0[0] * accel[2]
+        cz = g0[0] * accel[1] - g0[1] * accel[0]
+        proj = (cx, cy, cz)[axis]
+        dot = g0[0] * accel[0] + g0[1] * accel[1] + g0[2] * accel[2]
+        return math.degrees(math.atan2(proj, dot))
+
+    def step(self, buf, d):
+        """d = dicionário de configuração de direção; retorno: -1..1 ou None."""
+        if len(buf) < self.accel_off + 12 or buf[0] != self.rid:
+            return None
+        t = time.monotonic()
+        dt = 0.005 if self._last_t is None else min(0.05, max(0.0005, t - self._last_t))
+        self._last_t = t
+        accel, gyro = self._pair(buf)
+
+        self.dps = (gyro[self.gyro_axis] - self.neutral_gyro) \
+            * self.gyro_scale * self.gyro_sign
+
+        m = math.sqrt(sum(v * v for v in accel))
+        valid = self.mag_ref and abs(m - self.mag_ref) < 0.25 * self.mag_ref
+        # saturações do giroscópio (±32 °/s de teto do DualSense) não são
+        # confiáveis para integrar — nesses instantes a gravidadade manda mais
+        bruto = abs(gyro[self.gyro_axis])
+        saturado = bruto > 30000 or (self.mag_ref and not valid and bruto > 16000)
+        accel_angle = None
+        if valid:
+            accel_angle = self._roll_accel(accel, self.gyro_axis)
+
+        integ = self.angle + self.dps * dt
+        if accel_angle is not None:
+            k = self.fusao
+            if saturado:
+                k = max(k, 0.5)          # movimento rápido: gravidade manda
+            else:
+                # divergência grande + giroscópio calmo = integrador errou
+                # (recuperação rápida de movimentos ultra-rápidos)
+                diverge = abs(integ - accel_angle)
+                if diverge > 15.0 and abs(self.dps) < 10.0:
+                    k = max(k, min(0.35, 0.02 + diverge / 400.0))
+            self.angle = (1.0 - k) * integ + k * accel_angle
+        else:
+            self.angle = integ
+        self.angle = max(-180.0, min(180.0, self.angle))
+
+        # --- recentro automático: parado (~sem giro), segue a gravidade e
+        # --- aprende o drift residual do giroscópio (precisão de centro).
+        parado = self.mag_ref and abs(self.dps) < 2.0
+        if parado:
+            self._silencio = getattr(self, '_silencio', 0.0) + dt
+            if self._silencio > 1.2:
+                # assimila o neutro do giroscópio devagar (drift real)
+                raw_g = gyro[self.gyro_axis]
+                self.neutral_gyro += (raw_g - self.neutral_gyro) * min(0.5, dt * 0.6)
+                # e puxa o ângulo para a gravidade (recentro firme)
+                if accel_angle is not None:
+                    k = min(0.35, dt * 2.0)
+                    self.angle += (accel_angle - self.angle) * k
+        else:
+            self._silencio = 0.0
+
+        dzone = d['zona_morta']
+        if d['modo'] == 'taxa':
+            target = self.dps / max(1.0, d['taxa_giro_total'])
+        else:
+            a = abs(self.angle)
+            if a <= dzone:
+                target = 0.0
+            else:
+                sign = 1.0 if self.angle > 0 else -1.0
+                norm = min(1.0, (a - dzone) / max(1.0, d['angulo_max'] - dzone))
+                curva = float(d.get('curva', 1.0))
+                if curva != 1.0:
+                    norm = norm ** max(0.05, curva)
+                target = sign * norm
+        target = max(-1.0, min(1.0, target)) * self.inverter
+        tau = d['suavizacao_tau']
+        if tau > 0:
+            # filtro adaptativo: perto do centro 2x mais lento (precisão),
+            # nos extremos mantém a resposta rápida
+            fator_centro = 1.0 + 1.0 * (1.0 - min(1.0, abs(target)))
+            alpha = 1.0 - math.exp(-dt / (tau * fator_centro))
+            out = self._out + alpha * (target - self._out)
+            if abs(target) < 0.03:
+                out = target
+        else:
+            out = target
+        self._out = out
+        return out
+
+
+# ---------------------------------------------------------------------------
+# HUD e modos
+# ---------------------------------------------------------------------------
+def hud(angle, out):
+    width = 31
+    pos = int(round((max(-1.0, min(1.0, out)) + 1) * (width - 1) / 2))
+    bar = ['.'] * width
+    bar[width // 2] = '|'
+    bar[pos] = 'O'
+    sys.stdout.write('\rângulo %+07.2f°  [%s]  direção %+05.1f%%   '
+                     % (angle, ''.join(bar), out * 100.0))
+    sys.stdout.flush()
+
+
+def debug_line(sensor, buf):
+    if len(buf) < 48:
+        return 'report curto: len=%d' % len(buf)
+    if sensor.rid is None or buf[0] != sensor.rid:
+        return 'report id=0x%02X len=%d (aguardando id 0x%02X)' % \
+               (buf[0], len(buf), sensor.rid or 0)
+    accel, gyro = sensor._pair(buf)
+    m = math.sqrt(sum(v * v for v in accel))
+    dps = (gyro[sensor.gyro_axis] - sensor.neutral_gyro) * sensor.gyro_scale
+    return 'id=0x%02X accel=%s mag=%.0f gyro=%s roll=%+7.1fdps ângulo=%+.2f' % \
+           (buf[0], str(accel), m, str(gyro), dps, sensor.angle)
+
+
+# ---------------------------------------------------------------------------
+# configuração
+# ---------------------------------------------------------------------------
+def conf_padrao():
+    """(ler, salvar): tilt2drive.conf, migrando do motion-f1.conf antigo."""
+    novo = os.path.expanduser('~/.config/tilt2drive.conf')
+    antigo = os.path.expanduser('~/.config/motion-f1.conf')
+    if not os.path.exists(novo) and os.path.exists(antigo):
+        return antigo, novo      # 1a execução pós-renome: lê o antigo,
+    return novo, novo            # depois salvar_config já grava no novo
+
+
+def load_cfg(path):
+    cfg = copy.deepcopy(DEFAULTS)
+    cp = configparser.ConfigParser(strict=False)
+    cp.read(path)
+    for sec in cfg:
+        if sec in cp:
+            for key, default in cfg[sec].items():
+                try:
+                    if isinstance(default, float):
+                        cfg[sec][key] = cp.getfloat(sec, key, fallback=default)
+                    elif isinstance(default, int):
+                        cfg[sec][key] = cp.getint(sec, key, fallback=default)
+                    else:
+                        cfg[sec][key] = cp.get(sec, key, fallback=default)
+                except (ValueError, configparser.Error):
+                    pass  # mantém o padrão se a chave estiver confusa
+            # valores de texto podem ter comentário inline ("# ...")
+            for key, default in cfg[sec].items():
+                if isinstance(default, str) and default not in ('angulo', 'taxa') \
+                        and '#' in cfg[sec][key]:
+                    cfg[sec][key] = cfg[sec][key].split('#')[0].strip()
+    # migração: pedais antigos (zona_morta/curva compartilhadas) -> por pedal
+    if cp.has_section('volante'):
+        for novo, antigo, padrao in (('freio_zona_morta', 'pedal_zona_morta', 20.0),
+                                     ('acel_zona_morta', 'pedal_zona_morta', 20.0),
+                                     ('freio_curva', 'pedal_curva', 1.0),
+                                     ('acel_curva', 'pedal_curva', 1.0)):
+            if cp.has_option('volante', antigo) and \
+                    not cp.has_option('volante', novo):
+                try:
+                    v = cp.getfloat('volante', antigo)
+                    # 0.0 = valor de fábrica antigo (nunca ajustado): sem zona
+                    # morta o ruído dos gatilhos aciona o pedal sozinho
+                    cfg['volante'][novo] = v if v > 0 else padrao
+                except (ValueError, configparser.Error):
+                    pass
+    return cfg
+
+
+# ---------------------------------------------------------------------------
+# laço principal
+# ---------------------------------------------------------------------------
+def run(cfg, debug=False):
+    steer = None
+    fd = None
+    sensor = None
+    path = None
+    last_hud = 0.0
+    try:
+        log('Ao abrir: pareie o DualSense pelo Bluetooth e rode este comando.')
+        while True:
+            try:
+                if fd is None:
+                    fd, path = open_ds_or_wait()
+                    if sensor is None:
+                        sensor = Sensor(cfg['sensor'])
+                    sensor.calibrate(fd)
+                    vol = cfg.setdefault('volante', {})
+                    vol['freio_repouso'], vol['acel_repouso'] = sensor.pedal_rest
+                    if steer is None:
+                        modo = cfg.get('dispositivo', {}).get('modo', 'xbox')
+                        steer = Steer(modo, cfg.get('mapa_botoes'),
+                                      cfg.get('volante'))
+                        nome = steer.PERFIL[steer.modo]['name']
+                        log('Dispositivo virtual criado: "%s" (modo %s).'
+                            % (nome, steer.modo))
+                    log('Convertendo... (Ctrl+C para sair)')
+            except (RuntimeError, OSError) as e:
+                log('Erro: %s' % e)
+                if fd is not None:
+                    os.close(fd)
+                fd = None
+                time.sleep(2)
+                continue
+            r, _, _ = select.select([fd], [], [], 0.5)
+            if not r:
+                if not os.path.exists(path):
+                    log('')
+                    log('Controle desconectado — aguardando reconexão...')
+                    os.close(fd)
+                    fd = None
+                    sensor = None
+                continue
+            try:
+                buf = os.read(fd, 256)
+            except (BlockingIOError, OSError):
+                fd = None
+                sensor = None
+                continue
+            if not buf:
+                os.close(fd)
+                fd = None
+                sensor = None
+                continue
+            if debug:
+                print(debug_line(sensor, buf), flush=True)
+                continue
+            out = sensor.step(buf, cfg_direcao(cfg))
+            if out is None:
+                continue
+            now = time.monotonic()
+            if now - last_hud >= 0.03:
+                hud(sensor.angle, out)
+                last_hud = now
+            steer.feed(buf, int(round(max(-1.0, min(1.0, out)) * 32767)),
+                       DS_BASE.get(buf[0], 2))
+    except KeyboardInterrupt:
+        pass
+    finally:
+        log('')
+        log('Encerrando...')
+        if steer:
+            steer.close()
+        if fd:
+            os.close(fd)
+    return 0
+
+
+def main():
+    ap = argparse.ArgumentParser(
+        description='Direção do F1 25 pelo giroscópio do DualSense '
+                    '(só leitura do controle — nada é escrito para ele)')
+    ap.add_argument('--conf', default=conf_padrao()[0])
+    ap.add_argument('--debug', action='store_true', help='modo diagnóstico')
+    args = ap.parse_args()
+    sys.exit(run(load_cfg(args.conf), debug=args.debug))
+
+
+if __name__ == '__main__':
+    main()

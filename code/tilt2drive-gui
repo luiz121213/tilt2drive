@@ -1,0 +1,1645 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+tilt2drive-gui — interface gráfica para o tilt2drive.
+
+- Visualização em tempo real: ângulo (mira), gráfico temporal, barra de
+  esterço, dps do giroscópio e aceleração em g.
+- Configuração ao vivo: sliders/combos que alteram os valores imediatamente.
+- Recalibrar neutro, reconectar, salvar para ~/.config/tilt2drive.conf.
+
+Uso:
+  tilt2drive-gui             # abre a janela (o motor inicia sozinho)
+  tilt2drive-gui --selftest  # teste rápido sem interação
+
+Não rode o tilt2drive do terminal junto com a GUI (um leitor por vez).
+"""
+import argparse
+import copy
+import math
+import os
+import select
+import sys
+import threading
+import time
+from collections import deque
+import tkinter as tk
+from tkinter import ttk, messagebox, simpledialog
+from importlib.machinery import SourceFileLoader
+
+_HERE = os.path.dirname(os.path.abspath(__file__))
+_SCRIPT = os.path.realpath(os.path.join(_HERE, 'tilt2drive'))
+
+try:
+    M = SourceFileLoader('tilt2drive_engine', _SCRIPT).load_module()
+except Exception as e:
+    print('Não consegui carregar %s: %s' % (_SCRIPT, e))
+    sys.exit(1)
+
+CONF_PATH = os.path.expanduser('~/.config/tilt2drive.conf')
+PRESETS_DIR = os.path.expanduser('~/.config/tilt2drive-presets')
+PRESETS_DIR_OLD = os.path.expanduser('~/.config/motion-f1-presets')
+Steer = M.Steer   # atalho p/ perfis e nomes de saídas
+CONF_LER, CONF_PATH = M.conf_padrao()   # 1ª execução lerá o conf antigo
+
+
+def _achar_assets():
+    """Volante/ícones: primeiro no vault (pasta irmã assets/), depois share."""
+    aquivo = os.path.dirname(os.path.realpath(__file__))
+    for base in (os.path.join(os.path.dirname(aquivo), 'assets'),
+                 os.path.expanduser('~/.local/share/tilt2drive'),
+                 os.path.expanduser('~/.local/share/motion-f1')):
+        if os.path.exists(os.path.join(base, 'wheel.png')):
+            return base
+    return os.path.expanduser('~/.local/share/tilt2drive')
+
+
+ASSETS_DIR = _achar_assets()
+ICONS_DIR = os.path.join(ASSETS_DIR, 'icons')
+WHEEL_PATH = os.path.join(ASSETS_DIR, 'wheel.png')
+try:
+    from PIL import Image, ImageTk
+    _TEM_PIL = True
+except ImportError:     # funciona sem Pillow: sem volante animado/ícones
+    _TEM_PIL = False
+
+ICONES = {'cruz': 'cruz', 'circulo': 'circulo', 'quadrado': 'quadrado',
+          'triangulo': 'triangulo', 'l1': 'l1', 'r1': 'r1', 'l3': 'l3',
+          'r3': 'r3', 'create': 'create', 'options': 'options', 'ps': 'ps',
+          'touchpad': 'touchpad', 'cima': 'dpad_up', 'baixo': 'dpad_down',
+          'esquerda': 'dpad_left', 'direita': 'dpad_right'}
+
+# rotulos amigaveis das entradas do DualSense e das saidas do device virtual
+ROTULOS_DS = {'cruz': '✕ (cruz)', 'circulo': '○ (círculo)',
+              'quadrado': '□ (quadrado)', 'triangulo': '△ (triângulo)',
+              'l1': 'L1', 'r1': 'R1', 'create': 'Create/Share',
+              'options': 'Options', 'l3': 'L3 (stick esq.)',
+              'r3': 'R3 (stick dir.)', 'ps': 'PS', 'touchpad': 'Touchpad',
+              'cima': 'D-pad ↑', 'baixo': 'D-pad ↓',
+              'esquerda': 'D-pad ←', 'direita': 'D-pad →'}
+ROTULOS_SAI = {'a': 'Botão A (xbox)', 'b': 'Botão B (xbox)',
+               'x': 'Botão X (xbox)', 'y': 'Botão Y (xbox)',
+               'lb': 'LB (bumper esq.)', 'rb': 'RB (bumper dir.)',
+               'back': 'Back/Select', 'start': 'Start/Menu',
+               'ls': 'LS (stick esq. botão)', 'rs': 'RS (stick dir. botão)',
+               'guide': 'Guide (logo)', 'up': 'D-pad ↑',
+               'down': 'D-pad ↓', 'left': 'D-pad ←',
+               'right': 'D-pad →', 'none': '(none) solto',
+               'w1': 'Volante (G27): botão 1',
+               'w2': 'Volante (G27): botão 2',
+               'w3': 'Volante (G27): botão 3',
+               'w4': 'Volante (G27): botão 4',
+               'w5': 'Volante (G27): botão 5',
+               'w6': 'Volante (G27): botão 6',
+               'w7': 'Volante (G27): botão 7',
+               'w8': 'Volante (G27): botão 8',
+               'w9': 'Volante (G27): botão 9',
+               'w10': 'Volante (G27): botão 10',
+               'w11': 'Volante (G27): botão 11',
+               'w12': 'Volante (G27): botão 12',
+               'enter': 'Enter (teclado)', 'esc': 'Esc (teclado)',
+               'k_up': 'Seta ↑ (teclado)',
+               'k_down': 'Seta ↓ (teclado)',
+               'k_left': 'Seta ← (teclado)',
+               'k_right': 'Seta → (teclado)'}
+
+COR_BG = '#0d1117'
+COR_PAINEL = '#151b26'
+COR_TXT = '#e2e8f5'
+COR_MUT = '#8a97b4'
+COR_EIXO = '#3d8bfa'
+COR_NEEDLE = '#ffd166'
+COR_OK = '#4ade80'
+COR_WARN = '#fbbf24'
+COR_ERR = '#f87171'
+COR_FREIO = '#f05252'
+COR_GRADE = '#29344a'
+
+ACC_G = 8192.0          # LSB por g no DualSense
+JANELA_HIST = 260       # amostras do gráfico (~8,5 s a 30 Hz)
+
+
+class Engine(threading.Thread):
+    """Motor: lê o hidraw, calibra, cria o volante virtual e publica o estado."""
+
+    def __init__(self, cfg):
+        super().__init__(daemon=True)
+        self.cfg = cfg
+        self.sensor = None
+        self._stop = False
+        self._recal = False
+        self._reopen = False
+        self._ult_botoes = ()
+        self._trocar_modo = False
+        self._steer = None
+        self._lock = threading.Lock()
+        self._nrep = 0
+        self.state = {
+            'status': 'iniciando...', 'cor': COR_MUT, 'hidraw': '',
+            'angle': 0.0, 'out': 0.0, 'dps': 0.0,
+            'accel_g': (0.0, 0.0, 0.0), 'ga': 0.0, 'rps': 0.0,
+            'pedais': (0.0, 0.0),
+            'eixos': None, 'virtual': False, 'eixo_detectado': None,
+            'pedal_rest': (0.0, 0.0), 'botoes': (),
+            'cor': COR_MUT, 'status': 'iniciando...',
+        }
+        self._logs = deque(maxlen=8)
+        M.log = self._module_log   # captura os logs do módulo (calibração etc.)
+
+    # ---- comunicação com a GUI ----
+    def _module_log(self, msg='', end='\n'):
+        s = str(msg)
+        if s.strip():
+            with self._lock:
+                self._logs.append(s.rstrip('.') or '.')
+
+    def status(self, txt, cor=None):
+        with self._lock:
+            self.state['status'] = txt
+            if cor:
+                self.state['cor'] = cor
+
+    def snapshot(self):
+        with self._lock:
+            return dict(self.state)
+
+    def logs(self):
+        with self._lock:
+            return list(self._logs)
+
+    def recalibrar(self):
+        self._recal = True
+
+    def set_eixo_fixo(self, eixo):
+        """Trava (ou libera, com -1) o eixo de giro e recalibra na hora."""
+        self.cfg.setdefault('sensor', {})['eixo_giro'] = int(eixo)
+        self._recal = True
+
+    def _persistir_calibracao(self, sensor):
+        """Guarda eixo/sinal/escala detectados (se o usuário permitiu)."""
+        cfg_s = self.cfg.setdefault('sensor', {})
+        vol = self.cfg.setdefault('volante', {})
+        with self._lock:
+            self.state['eixo_detectado'] = sensor.gyro_axis
+            self.state['pedal_rest'] = sensor.pedal_rest
+        # repouso dos gatilhos: sempre aplica nesta sessão (calibração real)
+        vol['freio_repouso'], vol['acel_repouso'] = sensor.pedal_rest
+        if sensor.gyro_axis >= 0 and int(cfg_s.get('salvar_calibracao', 1)):
+            cfg_s['eixo_giro'] = sensor.gyro_axis
+            cfg_s['sinal_giro'] = sensor.gyro_sign
+            cfg_s['gyro_dps_por_lsb'] = sensor.gyro_scale
+            log('calibração guardada na config (eixo%d, sinal %+d, '
+                'escala %g dps/LSB)'
+                % (sensor.gyro_axis, int(sensor.gyro_sign),
+                   sensor.gyro_scale))
+        self._aplicar_pedais()   # device no ar reacende com o repouso novo
+
+    def reconectar(self):
+        self._reopen = True
+
+    def set_mapa(self, mapa):
+        """Aplica o mapa de botões ao vivo (device não recriado)."""
+        self.cfg['mapa_botoes'] = dict(mapa)
+        steer = self._steer
+        if steer:
+            steer.set_mapa(mapa)
+
+    def set_modo(self, modo):
+        """Troca o perfil do dispositivo (xbox / volante) ao vivo."""
+        self.cfg.setdefault('dispositivo', {})['modo'] = modo
+        self._trocar_modo = True
+
+    def _aplicar_pedais(self):
+        """Empurra repouso/zona morta/curva atuais p/ o device do modo volante.
+
+        Chamada a cada calibração: se o controle reconectar (BT↔USB) ou o
+        usuário recalibrar no meio do jogo, o repouso novo dos gatilhos entra
+        no device já rodando (antes, ficava o repouso da criação do device)."""
+        steer = self._steer
+        if not steer or steer.modo != 'volante':
+            return
+        vol = self.cfg.get('volante', {})
+        steer.set_pedais(vol.get('freio_zona_morta', 20.0),
+                         vol.get('freio_curva', 1.0),
+                         vol.get('acel_zona_morta', 20.0),
+                         vol.get('acel_curva', 1.0),
+                         vol.get('freio_repouso', 0.0),
+                         vol.get('acel_repouso', 0.0))
+
+    def set_pedais(self, freio_dz=20.0, freio_curva=1.0, acel_dz=20.0,
+                   acel_curva=1.0, freio_rep=0.0, acel_rep=0.0):
+        """Ajuste dos pedais ao vivo (modo volante)."""
+        vol = self.cfg.setdefault('volante', {})
+        vol.update({'freio_zona_morta': freio_dz, 'freio_curva': freio_curva,
+                    'acel_zona_morta': acel_dz, 'acel_curva': acel_curva,
+                    'freio_repouso': freio_rep, 'acel_repouso': acel_rep})
+        steer = self._steer
+        if steer:
+            steer.set_pedais(freio_dz, freio_curva, acel_dz, acel_curva,
+                             freio_rep, acel_rep)
+
+    def encerrar(self):
+        self._stop = True
+
+    # ---- internos ----
+    def _wait(self, seconds):
+        fim = time.monotonic() + seconds
+        while time.monotonic() < fim:
+            if self._stop:
+                return False
+            time.sleep(0.1)
+        return True
+
+    def _abrir_dispositivo(self):
+        while not self._stop:
+            path = M.find_ds_hidraw()
+            if path:
+                try:
+                    return (os.open(path, os.O_RDONLY | os.O_NONBLOCK | os.O_CLOEXEC),
+                            path)
+                except PermissionError:
+                    self.status('sem permissão em %s — rode: sudo tilt2drive-gui',
+                                COR_ERR)
+            else:
+                self.status('aguardando DualSense (conecte pelo Bluetooth)...',
+                            COR_MUT)
+            if not self._wait(1.5):
+                return None, None
+        return None, None
+
+    # ---- laço principal ----
+    def run(self):
+        fd = None
+        path = None
+        sensor = None
+        steer = None
+        ultima = time.monotonic()
+        try:
+            while not self._stop:
+                if fd is None:
+                    fd, path = self._abrir_dispositivo()
+                    if fd is None or self._stop:
+                        break
+                    self.status('calibrando — segure o controle parado...', COR_WARN)
+                    try:
+                        sensor = M.Sensor(copy.deepcopy(self.cfg['sensor']))
+                        sensor.calibrate(fd)
+                    except (RuntimeError, OSError) as e:
+                        self.status('erro: %s' % e, COR_ERR)
+                        with self._lock:
+                            self._logs.append('calibração: %s' % e)
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+                        fd = None
+                        if not self._wait(2.5):
+                            break
+                        continue
+                    self.sensor = sensor
+                    self._persistir_calibracao(sensor)
+                    modo = self.cfg.get('dispositivo', {}).get('modo', 'xbox')
+                    if steer is None or steer.modo != modo:
+                        try:
+                            if steer is not None:
+                                steer.close()
+                            steer = M.Steer(modo, self.cfg.get('mapa_botoes'),
+                                            self.cfg.get('volante'))
+                            with self._lock:
+                                self.state['virtual'] = True
+                                self._logs.append(
+                                    'dispositivo virtual: %s (modo %s)'
+                                    % (steer.PERFIL[modo]['name'], modo))
+                        except OSError as e:
+                            steer = None
+                            with self._lock:
+                                self._logs.append('uinput: %s' % e)
+                    self._steer = steer
+                    self._pub_eixos(sensor)
+                    self.status('ativo: %s' % path, COR_OK)
+                    ultima = time.monotonic()
+                if self._trocar_modo:
+                    self._trocar_modo = False
+                    novo = self.cfg.get('dispositivo', {}).get('modo', 'xbox')
+                    if steer is None or steer.modo != novo:
+                        log_msg = 'dispositivo virtual: %s (modo %s)' % (
+                            M.Steer.PERFIL[novo]['name'], novo)
+                        try:
+                            if steer is not None:
+                                steer.close()
+                                self._steer = None
+                            steer = M.Steer(novo, self.cfg.get('mapa_botoes'),
+                                            self.cfg.get('volante'))
+                            self._steer = steer
+                            with self._lock:
+                                self._logs.append(log_msg)
+                        except OSError as e:
+                            steer = None
+                            with self._lock:
+                                self._logs.append('uinput: %s' % e)
+                if self._recal:
+                    self._recal = False
+                    self.status('recalibrando — segure o controle parado...',
+                                COR_WARN)
+                    try:
+                        sensor = M.Sensor(copy.deepcopy(self.cfg['sensor']))
+                        sensor.calibrate(fd)
+                        self.sensor = sensor
+                        self._persistir_calibracao(sensor)
+                        self._pub_eixos(sensor)
+                        self.status('ativo: %s' % path, COR_OK)
+                    except (RuntimeError, OSError) as e:
+                        self.status('erro: %s' % e, COR_ERR)
+                        with self._lock:
+                            self._logs.append('recalibração: %s' % e)
+                if self._reopen:
+                    self._reopen = False
+                    try:
+                        os.close(fd)
+                    except OSError:
+                        pass
+                    fd = None
+                    self._wait(0.4)
+                    continue
+                r, _, _ = select.select([fd], [], [], 0.3)
+                if not r:
+                    if not os.path.exists(path):
+                        self.status('desconectado — aguardando...', COR_WARN)
+                        try:
+                            os.close(fd)
+                        except OSError:
+                            pass
+                        fd = None
+                        self._wait(0.4)
+                    continue
+                self._nrep += 1
+                try:
+                    buf = os.read(fd, 256)
+                except (BlockingIOError, OSError):
+                    continue
+                if not buf:
+                    continue
+                apertados = M.botoes_apertados(buf, M.DS_BASE.get(buf[0], 2))
+                if apertados != self._ult_botoes:
+                    self._ult_botoes = apertados
+                    with self._lock:
+                        self.state['botoes'] = apertados
+                try:
+                    out = sensor.step(buf, M.cfg_direcao(self.cfg))
+                    if out is None:
+                        continue
+                    if steer:
+                        steer.feed(buf, int(round(
+                            max(-1.0, min(1.0, out)) * 32767)),
+                            M.DS_BASE.get(buf[0], 2))
+                except Exception:
+                    # relatório ruim/cfg em transição não pode matar o motor
+                    continue
+                with self._lock:
+                    s = self.state
+                    s['angle'] = sensor.angle
+                    s['out'] = out
+                    s['dps'] = sensor.dps
+                    accel = sensor._pair(buf)[0]
+                    g = tuple(v / ACC_G for v in accel)
+                    s['accel_g'] = g
+                    s['ga'] = math.hypot(*g)
+                    # pedais p/ o HUD (0..1): no modo volante é o valor
+                    # processado (o que chega no jogo); no xbox, gatilho cru
+                    b_ds = M.DS_BASE.get(buf[0], 2)
+                    if steer and steer.modo == 'volante':
+                        f = steer._pedal(buf[b_ds + 4], 'freio') / 1020.0
+                        a_ = steer._pedal(buf[b_ds + 5], 'acel') / 1020.0
+                    else:
+                        f = buf[b_ds + 4] / 255.0
+                        a_ = buf[b_ds + 5] / 255.0
+                    s['pedais'] = (float(max(0.0, min(1.0, f))),
+                                   float(max(0.0, min(1.0, a_))))
+                agora = time.monotonic()
+                if agora - ultima >= 1.0:
+                    with self._lock:
+                        self.state['rps'] = self._nrep / (agora - ultima)
+                    self._nrep = 0
+                    ultima = agora
+        except Exception as e:
+            self.status('erro inesperado: %r' % e, COR_ERR)
+            with self._lock:
+                self._logs.append('engine: %r' % e)
+        finally:
+            if steer:
+                try:
+                    steer.emit(0)
+                    steer.close()
+                except OSError:
+                    pass
+            if fd:
+                try:
+                    os.close(fd)
+                except OSError:
+                    pass
+            self.status('motor parado', COR_MUT)
+
+    def _pub_eixos(self, sensor):
+        with self._lock:
+            self.state['eixos'] = (sensor.gyro_axis, int(sensor.gyro_sign),
+                                   sensor.gyro_scale, sensor.accel_off,
+                                   sensor.gyro_off)
+
+
+def salvar_config(cfg, path=CONF_PATH):
+    d, s = cfg['direcao'], cfg['sensor']
+    dv = cfg.get('direcao_volante', M.DEFAULTS['direcao_volante'])
+    disp = cfg.get('dispositivo', {'modo': 'xbox'})
+    mapa = cfg.get('mapa_botoes', Steer.MAPA_PADRAO)
+    vol = cfg.get('volante', M.DEFAULTS['volante'])
+    linhas_mapa = '\n'.join(
+        '%-10s = %s' % (k, mapa.get(k, Steer.MAPA_PADRAO[k]))
+        for k in Steer.DS_NAMES)
+    texto = """# tilt2drive — configuração (gerada pela GUI em {data})
+
+[direcao]
+# condução no modo CONTROLE (device xbox)
+modo = {modo}           # angulo | taxa
+angulo_max = {angulo_max}
+zona_morta = {zona_morta}
+suavizacao_tau = {tau}
+taxa_giro_total = {taxa}
+inverter = {inv}
+curva = {curva}
+
+[direcao_volante]
+# condução independente no modo VOLANTE
+modo = {v_modo}           # angulo | taxa
+angulo_max = {v_angulo_max}
+zona_morta = {v_zona_morta}
+suavizacao_tau = {v_tau}
+taxa_giro_total = {v_taxa}
+inverter = {v_inv}
+curva = {v_curva}
+
+[sensor]
+gyro_dps_por_lsb = {gyro}
+sinal_giro = {sinal}
+peso_accelerometro = {peso}
+eixo_vert = {ev}
+eixo_lat = {el}
+# eixo_giro: -1 = auto (detecta); 0/1/2 = fixo (x/y/z)
+eixo_giro = {eg}
+salvar_calibracao = {salv}
+
+[dispositivo]
+modo = {disp_modo}      # xbox | volante
+
+[volante]
+# config do modo volante ("Tilt2Drive Racing Wheel")
+gir_max = {gir_max}
+freio_zona_morta = {f_dz}
+acel_zona_morta = {a_dz}
+freio_curva = {f_curva}
+acel_curva = {a_curva}
+freio_repouso = {f_rep}
+acel_repouso = {a_rep}
+
+[mapa_botoes]
+# entradas do DualSense -> saídas do controle virtual
+{mapa}
+""".format(data=time.strftime('%Y-%m-%d %H:%M'),
+           modo=d['modo'], angulo_max=d['angulo_max'],
+           zona_morta=d['zona_morta'], tau=d['suavizacao_tau'],
+           taxa=d['taxa_giro_total'], inv=int(d['inverter']),
+           curva=d.get('curva', 1.0),
+           peso=s['peso_accelerometro'], ev=int(s['eixo_vert']),
+           el=int(s['eixo_lat']), eg=int(s['eixo_giro']),
+           gyro=float(s.get('gyro_dps_por_lsb', 0.0009765625)),
+           sinal=float(s.get('sinal_giro', 1.0)),
+           salv=int(s.get('salvar_calibracao', 1)),
+           disp_modo=disp.get('modo', 'xbox'), mapa=linhas_mapa,
+           gir_max=float(vol.get('gir_max', 900.0)),
+           f_dz=float(vol.get('freio_zona_morta', 20.0)),
+           a_dz=float(vol.get('acel_zona_morta', 20.0)),
+           f_curva=float(vol.get('freio_curva', 1.0)),
+           a_curva=float(vol.get('acel_curva', 1.0)),
+           f_rep=float(vol.get('freio_repouso', 0.0)),
+           a_rep=float(vol.get('acel_repouso', 0.0)),
+           v_modo=dv['modo'], v_angulo_max=dv['angulo_max'],
+           v_zona_morta=dv['zona_morta'], v_tau=dv['suavizacao_tau'],
+           v_taxa=dv['taxa_giro_total'], v_inv=int(dv['inverter']),
+           v_curva=dv.get('curva', 1.0))
+    with open(path, 'w') as fh:
+        fh.write(texto)
+
+
+# ---------------------------------------------------------------------------
+# presets de configuração
+# ---------------------------------------------------------------------------
+def presets_lista():
+    """Nomes (sem extensão) dos presets salvos, em ordem alfabética."""
+    nomes = set()
+    for d in (PRESETS_DIR, PRESETS_DIR_OLD):   # lê os dois (migração)
+        try:
+            nomes |= {f[:-5] for f in os.listdir(d) if f.endswith('.conf')}
+        except OSError:
+            pass
+    return sorted(nomes)
+
+
+def preset_path(nome):
+    """Caminho do arquivo do preset; nome já deve estar saneado."""
+    os.makedirs(PRESETS_DIR, exist_ok=True)   # grava no dir novo
+    novo = os.path.join(PRESETS_DIR, nome + '.conf')
+    velho = os.path.join(PRESETS_DIR_OLD, nome + '.conf')
+    if os.path.exists(novo):
+        return novo
+    if os.path.exists(velho):                   # preset antigo: gerencia lá
+        return velho
+    return novo
+
+
+class App:
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.root = tk.Tk()
+        self.root.title('Tilt2Drive — Direção por giroscópio (DualSense)')
+        self.root.configure(bg=COR_BG)
+        self.root.minsize(760, 520)
+        self.root.geometry('1024x780')
+        self.historico = deque(maxlen=JANELA_HIST)
+        self._sliders = {}
+
+        self.engine = Engine(self.cfg)
+        # volante animado + ícones dos botões (imagens locais, via Pillow)
+        self._wheel_pil = None
+        self._wheel_tk = None
+        self._wheel_rot = None
+        self._wheel_sz = 168
+        self._icones = {}
+        self._mapa_vis = {}
+        self._mapa_base = {}
+        self._mapa_canv = None
+        self._botoes_ultimo = frozenset()
+        if _TEM_PIL:
+            try:
+                if os.path.exists(WHEEL_PATH):
+                    self._wheel_pil = Image.open(WHEEL_PATH).convert('RGBA'). \
+                        resize((260, 260), Image.LANCZOS)
+            except Exception:
+                self._wheel_pil = None
+        self.icone = lambda nome: self._icones.get(nome)
+        self._montar_toolbar()
+        self._montar_canvas()
+        # status e logs empacotados ANTES do scroll: assim a coluna de
+        # configurações usa a largura toda (sliders alinhados, sem cortes)
+        self._montar_logs()
+        self._montar_scroll()
+        self._montar_config()
+        self._montar_presets()
+        self.engine.start()
+
+        self.root.protocol('WM_DELETE_WINDOW', self._fechar)
+        self.root.after(60, self._tick)
+
+    # --------------------------------------------------------------- UI
+    def _botao(self, pai, texto, cb):
+        return tk.Button(pai, text=texto, command=cb, bg='#232b3a', fg=COR_TXT,
+                         activebackground='#2e384e', activeforeground=COR_TXT,
+                         relief='flat', padx=10, pady=4, takefocus=0)
+
+    def _montar_toolbar(self):
+        bar = tk.Frame(self.root, bg=COR_BG)
+        bar.pack(fill='x', padx=12, pady=(10, 4))
+        self.lbl_status = tk.Label(bar, text='iniciando...', fg=COR_MUT,
+                                   bg=COR_BG, font=('Segoe UI', 12, 'bold'))
+        self.lbl_status.pack(side='left')
+        self.lbl_hid = tk.Label(bar, text='', fg=COR_MUT, bg=COR_BG,
+                                font=('Segoe UI', 9))
+        self.lbl_hid.pack(side='left', padx=(14, 0))
+        self.btn_motor = self._botao(bar, 'Parar motor', self._toggle_motor)
+        self.btn_motor.pack(side='right', padx=(6, 0))
+        self._botao(bar, 'Salvar config', self._salvar).pack(side='right',
+                                                             padx=(6, 0))
+        self._botao(bar, 'Reconectar',
+                    self.engine.reconectar).pack(side='right', padx=(6, 0))
+        self._botao(bar, 'Recalibrar',
+                    self.engine.recalibrar).pack(side='right', padx=(6, 0))
+
+    def _montar_canvas(self):
+        frame = tk.Frame(self.root, bg=COR_PAINEL, highlightthickness=1,
+                         highlightbackground=COR_GRADE)
+        frame.pack(fill='x', padx=12, pady=6)
+        self.canv = tk.Canvas(frame, bg=COR_BG, highlightthickness=0,
+                              height=300)
+        self.canv.pack(fill='x', padx=2, pady=2, expand=True)
+
+    def _montar_scroll(self):
+        """Canvas rolável com todos os frames de config (janelas pequenas)."""
+        self._scroll = tk.Canvas(self.root, bg=COR_BG, highlightthickness=0)
+        barra = ttk.Scrollbar(self.root, orient='vertical',
+                              command=self._scroll.yview)
+        self._scroll.configure(yscrollcommand=barra.set)
+        self._scroll.pack(side='left', fill='both', expand=True)
+        barra.pack(side='right', fill='y')
+        self._scroll_frame = tk.Frame(self._scroll, bg=COR_BG)
+        self._scroll_window = self._scroll.create_window(
+            (0, 0), window=self._scroll_frame, anchor='nw')
+        self._scroll_frame.bind(
+            '<Configure>',
+            lambda _e: (self._scroll.configure(scrollregion=self._scroll.bbox('all')),
+                        self._ajustar_largura()))
+        self.root.bind('<Configure>', self._ajustar_largura)
+        for ev in ('<MouseWheel>', '<Button-4>', '<Button-5>'):
+            self._scroll.bind_all(ev, self._rolar)
+
+    def _ajustar_largura(self, _ev=None):
+        try:
+            w = self._scroll.winfo_width()
+            if w > 1:
+                self._scroll.itemconfig(self._scroll_window, width=w)
+        except Exception:
+            pass
+
+    def _rolar(self, ev):
+        d = ev.delta / 120.0 if ev.type == '4' or ev.delta else \
+            (-1 if ev.num == 4 else 1)
+        # Button-4/5 no Linux: num 4 = cima (sobe), 5 = baixo (desce)
+        if ev.num == 4:
+            d = 1
+        elif ev.num == 5:
+            d = -1
+        try:
+            self._scroll.yview_scroll(-int(d), 'units')
+        except Exception:
+            pass
+
+    SLIDERS_CONDUCAO = (
+        ('angulo_max', 'Ângulo máximo (graus)', 10, 90, 1),
+        ('zona_morta', 'Zona morta (graus)', 0, 8, 0.5),
+        ('suavizacao_tau', 'Suavização (s)', 0, 0.15, 0.005),
+        ('taxa_giro_total', 'Taxa total (graus/s)  [modo taxa]', 30, 300, 10),
+        ('curva', 'Curva de resposta do esterço (1.0 = linear)', 0.4, 2.0, 0.05),
+    )
+    SLIDERS_VOLANTE = (
+        ('gir_max', 'Rotação do volante (graus)', 180, 1440, 30),
+        ('freio_zona_morta', 'Freio (L2): zona morta', 0, 80, 1),
+        ('acel_zona_morta', 'Acelerador (R2): zona morta', 0, 80, 1),
+        ('freio_curva', 'Freio: curva', 0.5, 2.0, 0.05),
+        ('acel_curva', 'Acelerador: curva', 0.5, 2.0, 0.05),
+    )
+
+    def _montar_config(self):
+        self._frames_cfg = {}
+        self.v_modo = {}
+        self.v_inv = {}
+
+        # ---- frame sempre visível: dispositivo + fábrica ----
+        quad = tk.LabelFrame(self._scroll_frame, text=' Dispositivo virtual ',
+                             bg=COR_PAINEL, fg=COR_TXT, bd=1, relief='flat')
+        quad.pack(fill='x', padx=12, pady=6)
+        topo = tk.Frame(quad, bg=COR_PAINEL)
+        topo.pack(fill='x', padx=10, pady=(8, 8))
+        self._var_disp = tk.StringVar(
+            value='volante' if self.cfg.get('dispositivo', {}).get(
+                'modo') == 'volante' else 'xbox')
+        col = tk.Frame(topo, bg=COR_PAINEL)
+        col.pack(side='left')
+        tk.Label(col, text='Modo escolhido (as configurações abaixo se '
+                           'adaptam)', bg=COR_PAINEL, fg=COR_MUT,
+                 font=('Segoe UI', 9)).pack(anchor='w')
+        c = ttk.Combobox(col, textvariable=self._var_disp, width=10,
+                         values=['xbox', 'volante'], state='readonly')
+        c.pack(anchor='w', pady=2)
+        c.bind('<<ComboboxSelected>>', self._cb_dispositivo)
+        self._botao(topo, 'Restaurar padrões',
+                    self._restaurar_padroes).pack(side='right', padx=4)
+
+        self._montar_frame_dir('direcao', ' Controle (xbox)')
+        self._montar_frame_volante()
+        self._montar_frame_sensor()
+        self._montar_mapa()
+        self._atualizar_visibilidade()
+
+    def _montar_frame_dir(self, sec, titulo):
+        """Frame de condução de um modo (combos + 5 sliders)."""
+        quad = tk.LabelFrame(self._scroll_frame, text=' %s — condução ' % titulo,
+                             bg=COR_PAINEL, fg=COR_TXT, bd=1, relief='flat')
+        self._frames_cfg[sec] = quad
+        self.v_modo[sec] = tk.StringVar(value=self.cfg[sec]['modo'])
+        self.v_inv[sec] = tk.StringVar(
+            value='invertida' if self.cfg[sec]['inverter'] < 0 else 'normal')
+        topo = tk.Frame(quad, bg=COR_PAINEL)
+        topo.pack(fill='x', padx=10, pady=(8, 0))
+        for lado, (texto, valores, var, cb) in enumerate((
+                ('Modo de dirigir', ['angulo', 'taxa'], self.v_modo[sec],
+                 lambda _e, s=sec: self._cb_modo(s)),
+                ('Direção', ['normal', 'invertida'], self.v_inv[sec],
+                 lambda _e, s=sec: self._cb_inverter(s)))):
+            col = tk.Frame(topo, bg=COR_PAINEL)
+            col.pack(side='left', padx=(0, 30))
+            tk.Label(col, text=texto, bg=COR_PAINEL, fg=COR_MUT,
+                     font=('Segoe UI', 9)).pack(anchor='w')
+            c = ttk.Combobox(col, textvariable=var, width=10,
+                             values=valores, state='readonly')
+            c.pack(anchor='w', pady=2)
+            c.bind('<<ComboboxSelected>>', cb)
+        self._grade_sliders(quad, sec, self.SLIDERS_CONDUCAO, 0,
+                            dica=self.DICA_CURVA)
+
+    def _montar_frame_volante(self):
+        """Frame completo do modo volante: condução + rotação e pedais."""
+        sec = 'direcao_volante'
+        quad = tk.LabelFrame(
+            self._scroll_frame,
+            text=' Volante (volante) — condução, rotação e pedais ',
+            bg=COR_PAINEL, fg=COR_TXT, bd=1, relief='flat')
+        self._frames_cfg['volante_completo'] = quad
+        self.v_modo[sec] = tk.StringVar(value=self.cfg[sec]['modo'])
+        self.v_inv[sec] = tk.StringVar(
+            value='invertida' if self.cfg[sec]['inverter'] < 0 else 'normal')
+        topo = tk.Frame(quad, bg=COR_PAINEL)
+        topo.pack(fill='x', padx=10, pady=(8, 0))
+        for lado, (texto, valores, var, cb) in enumerate((
+                ('Modo de dirigir', ['angulo', 'taxa'], self.v_modo[sec],
+                 lambda _e, s=sec: self._cb_modo(s)),
+                ('Direção', ['normal', 'invertida'], self.v_inv[sec],
+                 lambda _e, s=sec: self._cb_inverter(s)))):
+            col = tk.Frame(topo, bg=COR_PAINEL)
+            col.pack(side='left', padx=(0, 30))
+            tk.Label(col, text=texto, bg=COR_PAINEL, fg=COR_MUT,
+                     font=('Segoe UI', 9)).pack(anchor='w')
+            c = ttk.Combobox(col, textvariable=var, width=10,
+                             values=valores, state='readonly')
+            c.pack(anchor='w', pady=2)
+            c.bind('<<ComboboxSelected>>', cb)
+        self._grade_sliders(quad, 'direcao_volante',
+                            self.SLIDERS_CONDUCAO, 0,
+                            dica=self.DICA_CURVA)
+        sep = tk.Frame(quad, bg=COR_GRADE, height=1)
+        rot_peds = tk.Frame(quad, bg=COR_PAINEL)
+        rot_peds.pack(fill='x', padx=10, pady=(4, 0))
+        tk.Label(rot_peds, text='Pedais e rotação do volante virtual '
+                                '(L2 = freio, R2 = acelerador)',
+                 bg=COR_PAINEL, fg=COR_MUT,
+                 font=('Segoe UI', 9)).pack(anchor='w')
+        self.lbl_pedais = tk.Label(rot_peds, text='repouso detectado: —',
+                                 bg=COR_PAINEL, fg=COR_MUT,
+                                 font=('Segoe UI', 9))
+        self.lbl_pedais.pack(anchor='w')
+        peds = tk.Frame(quad, bg=COR_PAINEL)
+        self._grade_sliders(quad, 'volante', self.SLIDERS_VOLANTE,
+                            0, dentro=peds)
+        peds.pack(fill='x', padx=10, pady=(0, 10))
+
+    def _montar_frame_sensor(self):
+        quad = tk.LabelFrame(self._scroll_frame, text=' Sensor (comum aos dois modos) ',
+                             bg=COR_PAINEL, fg=COR_TXT, bd=1, relief='flat')
+        self._frame_sensor = quad
+        top = tk.Frame(quad, bg=COR_PAINEL)
+        top.pack(fill='x', padx=10, pady=(8, 0))
+        eix_s = self.cfg.get('sensor', {})
+
+        def _rotulo_eixo(v):
+            return ['x', 'y', 'z'][min(2, max(0, int(v)))] if int(v) >= 0 \
+                else 'auto'
+        self._var_eixo = tk.StringVar(
+            value=_rotulo_eixo(eix_s.get('eixo_giro', -1)))
+        self._var_salvar_cal = tk.StringVar(
+            value='sim' if int(eix_s.get('salvar_calibracao', 1)) else 'nao')
+        for texto, valores, var, cb in (
+                ('Eixo de giro (x/y/z fixa o eixo; auto detecta)',
+                 ['auto', 'x', 'y', 'z'], self._var_eixo, self._cb_eixo),
+                ('Guardar calibração detectada',
+                 ['sim', 'nao'], self._var_salvar_cal,
+                 self._cb_salvar_cal)):
+            col = tk.Frame(top, bg=COR_PAINEL)
+            col.pack(side='left', padx=(0, 30))
+            tk.Label(col, text=texto, bg=COR_PAINEL, fg=COR_MUT,
+                     font=('Segoe UI', 9)).pack(anchor='w')
+            c = ttk.Combobox(col, textvariable=var, width=8,
+                             values=valores, state='readonly')
+            c.pack(anchor='w', pady=2)
+            c.bind('<<ComboboxSelected>>', cb)
+        self._grade_sliders(
+            quad, 'sensor',
+            (('peso_accelerometro', 'Peso do acelerômetro', 0.0, 0.10, 0.005),),
+            0)
+
+    def _cb_eixo(self, _ev=None):
+        valor = {'auto': -1, 'x': 0, 'y': 1, 'z': 2}[self._var_eixo.get()]
+        self.cfg.setdefault('sensor', {})['eixo_giro'] = valor
+        self.engine.set_eixo_fixo(valor)
+
+    def _cb_salvar_cal(self, _ev=None):
+        self.cfg.setdefault('sensor', {})['salvar_calibracao'] = (
+            1 if self._var_salvar_cal.get() == 'sim' else 0)
+
+    DICA_CURVA = ('curva < 1.0 = agressivo (inclinando pouco já vira muito)   '
+                  '·   1.0 = linear   ·   curva > 1.0 = começa suave (mais '
+                  'precisão dos pequenos ângulos até o máximo)')
+
+    def _grade_sliders(self, quad, sec, lista, linha_inicial, dentro=None,
+                       dica=None):
+        """Coloca os sliders de uma seção em 2 colunas; o valor numérico
+        é um campo digitável (Enter/FocusOut aplica; fora da faixa corta)."""
+        grade = dentro or tk.Frame(quad, bg=COR_PAINEL)
+        if dentro is None:
+            grade.pack(fill='x', padx=10, pady=(2, 10))
+        for i, (chave, rotulo, mn, mx, passo) in enumerate(lista):
+            cell = tk.Frame(grade, bg=COR_PAINEL)
+            cell.grid(row=linha_inicial + i // 2, column=i % 2,
+                      sticky='nwe', padx=8, pady=3)
+            tk.Label(cell, text=rotulo, bg=COR_PAINEL, fg=COR_MUT,
+                     wraplength=210, justify='left', anchor='w',
+                     font=('Segoe UI', 9)).pack(anchor='w', fill='x')
+            var = tk.DoubleVar(value=float(self.cfg.get(sec, {}).get(
+                chave, M.DEFAULTS.get(sec, {}).get(chave, 0.0))))
+            val_var = tk.StringVar()
+            linha = tk.Frame(cell, bg=COR_PAINEL)
+            linha.pack(fill='x')
+            ttk.Scale(linha, from_=mn, to=mx, variable=var,
+                      command=lambda val, s=sec, ch=chave, vv=val_var:
+                      self._cb_slider(s, ch, val, vv)).pack(
+                side='left', fill='x', expand=True)
+            ent = tk.Entry(linha, textvariable=val_var, width=7,
+                           font=('Consolas', 10, 'bold'), bg=COR_BG,
+                           fg=COR_TXT, relief='flat', justify='center',
+                           highlightthickness=1,
+                           highlightbackground=COR_GRADE,
+                           insertbackground=COR_TXT)
+            ent.pack(side='right', padx=(6, 0))
+
+            def commit(_e=None, s=sec, ch=chave, mn=mn, mx=mx, var=var,
+                       vv=val_var):
+                bruto = (vv.get() or '').strip().replace(',', '.')
+                try:
+                    v = float(bruto)
+                except ValueError:
+                    vv.set('%g' % var.get())   # inválido: volta ao atual
+                    return
+                if v < mn or v > mx:           # fora da faixa: corta
+                    v = max(mn, min(mx, v))
+                var.set(v)                     # move o slider
+                # ttk.Scale só dispara command ao interagir; aplica na mão:
+                self._cb_slider(s, ch, v, vv)
+
+            ent.bind('<Return>', commit)
+            ent.bind('<KP_Enter>', commit)
+            ent.bind('<FocusOut>', commit)
+            ent.bind('<FocusIn>',
+                     lambda _e, e=ent: e.selection_range(0, 'end'))
+            self._sliders[(sec, chave)] = (var, val_var)
+            self._cb_slider(sec, chave, var.get(), val_var, aplicar=False)
+        for col in range(2):
+            grade.columnconfigure(col, weight=1, uniform='sliders')
+        if dica:
+            tk.Label(quad, text=dica, bg=COR_PAINEL, fg=COR_MUT,
+                     wraplength=430, justify='left',
+                     font=('Segoe UI', 8)).pack(fill='x', padx=14,
+                                                pady=(0, 6))
+
+    def _atualizar_visibilidade(self):
+        """Mostra só os frames do modo escolhido (xbox / volante)."""
+        modo = self.cfg.get('dispositivo', {}).get('modo', 'xbox')
+        f_xbox = self._frames_cfg.get('direcao')
+        f_vol = self._frames_cfg.get('volante_completo')
+        try:
+            f_xbox.pack_forget()
+        except Exception:
+            pass
+        try:
+            f_vol.pack_forget()
+        except Exception:
+            pass
+        self._frame_sensor.pack(fill='x', padx=12, pady=6,
+                                before=self._mapa_frame)
+        f_modo = f_vol if modo == 'volante' else f_xbox
+        if f_modo is not None:
+            f_modo.pack(fill='x', padx=12, pady=6,
+                        before=self._frame_sensor)
+
+
+    def _montar_mapa(self):
+        """Mapa de botões: DualSense desenhado no canvas; botão pressionado
+        acende azul na posição certa; clique abre a janela de função."""
+        mapa_quad = tk.LabelFrame(
+            self._scroll_frame,
+            text=' Mapa de botões  (azul = pressionado; clique um botão '
+                 'para escolher a função) ',
+            bg=COR_PAINEL, fg=COR_TXT, bd=1, relief='flat')
+        self._mapa_frame = mapa_quad
+        mapa_quad.pack(fill='x', padx=12, pady=6)
+        c = tk.Canvas(mapa_quad, width=640, height=340, bg=COR_BG,
+                      highlightthickness=0)
+        c.pack(anchor='center', padx=10, pady=(2, 8))
+        self._mapa_canv = c
+        self._mapa_cells = {}
+        self._mapa_vars = {}
+        self._mapa_vis = {}
+        self._mapa_base = {}
+        self._botoes_ultimo = frozenset()
+        self._mapa_modo = 'vetor'
+        self._mapa_ptos = {}   # nome -> (x, y, r) no canvas
+        self._mapa_ret = {}    # nome -> (x1, y1, x2, y2) no canvas
+
+        def rrect(x1, y1, x2, y2, r, fill, outline=COR_GRADE, w=1):
+            r = max(0.0, min(r, (x2 - x1) / 2.0, (y2 - y1) / 2.0))
+            pts = (x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r,
+                   x2, y2, x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r,
+                   x1, y1 + r, x1, y1)
+            return c.create_polygon(*pts, fill=fill, outline=outline,
+                                    width=w, smooth=True)
+
+        def txt(x, y, s, cor=COR_MUT, f=('Segoe UI', 8), anc='n'):
+            return c.create_text(x, y, text=s, fill=cor, font=f, anchor=anc)
+
+        info_def = 'clique um botão do controle para escolher a função'
+        info = c.create_text(68, 13, anchor='w', fill=COR_MUT,
+                             font=('Segoe UI', 8), text=info_def)
+
+        def hov_nome(nome):
+            saida = self.cfg.get('mapa_botoes', {}).get(
+                nome, Steer.MAPA_PADRAO.get(nome, 'none'))
+            return '  %s → %s' % (ROTULOS_DS.get(nome, nome),
+                                       ROTULOS_SAI.get(saida, saida))
+
+        def ent(e, nome):
+            c.itemconfig(info, text=hov_nome(nome))
+
+        def sai(_e):
+            c.itemconfig(info, text=info_def)
+
+        def liga(nome, item, base, clique=True):
+            """Item do mapa: guarda cor base; liga clique/hover por item
+            (modo vetor). No modo imagem o clique é por proximidade no
+            canvas inteiro (anel com fill='' só recebe clique na borda)."""
+            self._mapa_vis[nome] = item
+            self._mapa_base[nome] = base
+            if clique:
+                c.tag_bind(item, '<Button-1>',
+                           lambda _e, nm=nome: self._mapa_dialogo(nm))
+            c.tag_bind(item, '<Enter>', lambda e, nm=nome: ent(e, nm))
+            c.tag_bind(item, '<Leave>', sai)
+        if self._mapa_fundo(c, liga):
+            c.configure(cursor='hand2')
+
+            def clique_mapa(e):
+                nm = self._mapa_no(e.x, e.y)
+                if nm:
+                    self._mapa_dialogo(nm)
+
+            def mov_mapa(e):
+                nm = self._mapa_no(e.x, e.y)
+                c.itemconfig(info, text=(hov_nome(nm) if nm else info_def))
+
+            c.bind('<Button-1>', clique_mapa)
+            c.bind('<Motion>', mov_mapa)
+            return
+
+        # corpo do controle (contorno arredondado, vista de cima)
+        c.create_polygon(
+            98, 80, 128, 56, 210, 44, 320, 42, 430, 44, 512, 56, 542, 80,
+            574, 124, 560, 200, 520, 244, 484, 256, 444, 228, 396, 214,
+            244, 214, 196, 228, 156, 256, 120, 244, 80, 200, 66, 124,
+            fill='#1b2230', outline=COR_GRADE, width=2, smooth=True)
+
+        # touchpad (o clique é o botão 'touchpad')
+        tp = rrect(292, 56, 348, 96, 10, '#2b3550')
+        c.create_line(292, 76, 348, 76, fill='#0d1118', width=2)
+        txt(320, 108, 'touchpad (clique)')
+        liga('touchpad', tp, '#2b3550')
+
+        # create / options
+        cr = rrect(260, 100, 270, 128, 5, '#2b3550')
+        txt(265, 136, 'Create')
+        liga('create', cr, '#2b3550')
+        op = rrect(370, 100, 380, 128, 5, '#2b3550')
+        txt(375, 136, 'Options')
+        liga('options', op, '#2b3550')
+
+        # sticks (pressionar = L3/R3)
+        for nome, sx in (('l3', 198), ('r3', 442)):
+            c.create_oval(sx - 23, 95, sx + 23, 141, fill='#151b26',
+                          outline='#0d1118', width=3)
+            inn = c.create_oval(sx - 11, 107, sx + 11, 129, fill='#2b3550',
+                                outline='#0d1118', width=2)
+            txt(sx, 148, nome.upper())
+            liga(nome, inn, '#2b3550')
+
+        # L1 / R1
+        l1 = rrect(100, 34, 168, 52, 9, '#2b3550')
+        txt(134, 43, 'L1', COR_TXT, ('Segoe UI', 8, 'bold'), 'center')
+        liga('l1', l1, '#2b3550')
+        r1 = rrect(472, 34, 540, 52, 9, '#2b3550')
+        txt(506, 43, 'R1', COR_TXT, ('Segoe UI', 8, 'bold'), 'center')
+        liga('r1', r1, '#2b3550')
+
+        # d-pad (4 botões separados em cruz)
+        for nome, x1, y1, x2, y2, t_pts in (
+                ('cima', 127, 177, 153, 200,
+                 (133, 195, 147, 195, 140, 183)),
+                ('baixo', 127, 210, 153, 233,
+                 (133, 215, 147, 215, 140, 227)),
+                ('esquerda', 112, 192, 133, 218,
+                 (129, 198, 129, 212, 117, 205)),
+                ('direita', 147, 192, 168, 218,
+                 (151, 198, 151, 212, 163, 205))):
+            arm = rrect(x1, y1, x2, y2, 5, '#2b3550')
+            c.create_polygon(*t_pts, fill='#0d1118', outline='')
+            liga(nome, arm, '#2b3550')
+
+        # botões do rosto
+        for nome, cx, cy, sym in (('quadrado', 461, 206, '□'),
+                                  ('triangulo', 484, 183, '△'),
+                                  ('cruz', 484, 231, '✕'),
+                                  ('circulo', 507, 206, '○')):
+            ov = c.create_oval(cx - 13, cy - 13, cx + 13, cy + 13,
+                               fill='#2b3550', outline='#151b26', width=2)
+            g = c.create_text(cx, cy + 1, text=sym, fill='#9fb2d4',
+                              font=('Segoe UI', 10, 'bold'))
+            c.tag_bind(g, '<Button-1>',
+                       lambda _e, nm=nome: self._mapa_dialogo(nm))
+            c.tag_bind(g, '<Enter>', lambda e, nm=nome: ent(e, nm))
+            c.tag_bind(g, '<Leave>', sai)
+            liga(nome, ov, '#2b3550')
+
+        # PS
+        ps = c.create_oval(306, 198, 334, 226, fill='#2b3550',
+                           outline='#151b26', width=2)
+        txt(320, 232, 'PS')
+        liga('ps', ps, '#2b3550')
+
+    def _mapa_no(self, x, y):
+        """Nome do botão do mapa sob (x, y): primeiro por raio (anéis),
+        depois por retângulo (touchpad). None se fora de tudo."""
+        for nome, (cx, cy, r) in self._mapa_ptos.items():
+            if (x - cx) ** 2 + (y - cy) ** 2 <= (r * 1.15) ** 2:
+                return nome
+        for nome, (x1, y1, x2, y2) in self._mapa_ret.items():
+            if x1 <= x <= x2 and y1 <= y <= y2:
+                return nome
+        return None
+
+    def _mapa_fundo(self, c, liga):
+        """Fundo com a arte real do DualSense (PNG convertido do SVG do
+        usuario, recolorido ao tema). Retorna True se usou a imagem, com
+        aneis de hotspot sobre cada botao; queda de volta no desenho."""
+        caminho = os.path.join(ICONS_DIR, 'dualsense.png')
+        if not (_TEM_PIL and os.path.exists(caminho)):
+            return False
+        try:
+            im = Image.open(caminho).convert('RGBA')
+            s = min(460.0 / im.width, 292.0 / im.height)
+            tw, th = max(1, int(im.width * s)), max(1, int(im.height * s))
+            im = im.resize((tw, th), Image.LANCZOS)
+            self._mapa_img_ref = ImageTk.PhotoImage(im)   # mantem viva
+        except Exception:
+            return False
+        dx = (640 - tw) / 2.0
+        dy = 44.0
+        c.create_image(dx + tw / 2.0, dy + th / 2.0,
+                       image=self._mapa_img_ref)
+        # hotspots em pixels da arte original (medidos na arte)
+        for nome, cx, cy, r in (
+                ('triangulo', 1022, 148, 47), ('quadrado', 924, 244, 45),
+                ('circulo', 1120, 242, 46), ('cruz', 1022, 335, 45),
+                ('cima', 235, 167, 45), ('baixo', 227, 312, 45),
+                ('esquerda', 152, 237, 45), ('direita', 317, 240, 45),
+                ('l3', 430, 413, 48), ('r3', 828, 413, 48),
+                ('l1', 245, 32, 75), ('r1', 1040, 33, 75),
+                ('create', 332, 111, 28), ('options', 934, 105, 28),
+                ('ps', 637, 400, 50)):
+            anel = c.create_oval(dx + (cx - r) * s, dy + (cy - r) * s,
+                                 dx + (cx + r) * s, dy + (cy + r) * s,
+                                 fill='', outline='#3d455e',
+                                 dash=(3, 2), width=1)
+            liga(nome, anel, None, clique=False)
+            self._mapa_ptos[nome] = (dx + cx * s, dy + cy * s, r * s)
+        tp = c.create_rectangle(dx + 378 * s, dy + 28 * s,
+                                dx + 882 * s, dy + 292 * s,
+                                fill='', outline='#3d455e',
+                                dash=(3, 2), width=1)
+        liga('touchpad', tp, None, clique=False)
+        self._mapa_ret['touchpad'] = (dx + 378 * s, dy + 28 * s,
+                                      dx + 882 * s, dy + 292 * s)
+        self._mapa_modo = 'imagem'
+        return True
+
+    def _mapa_dialogo(self, nome):
+        """Janela modal para escolher a função de um botão do DualSense."""
+        mapa = self.cfg.setdefault('mapa_botoes',
+                                   {k: v for k, v in
+                                    Steer.MAPA_PADRAO.items()})
+        atual = mapa.get(nome, Steer.MAPA_PADRAO.get(nome, 'none'))
+        win = tk.Toplevel(self.root)
+        win.title('Função do botão')
+        win.configure(bg=COR_PAINEL)
+        win.transient(self.root)
+        win.resizable(False, False)
+        win.protocol('WM_DELETE_WINDOW', win.destroy)
+        quad = tk.Frame(win, bg=COR_PAINEL)
+        quad.pack(fill='both', expand=True)
+        tk.Label(quad, bg=COR_PAINEL, fg=COR_TXT,
+                 font=('Segoe UI', 11, 'bold'),
+                 text='"%s" → o que enviar ao device virtual:'
+                 % ROTULOS_DS.get(nome, nome)).pack(
+            anchor='w', padx=14, pady=(12, 4))
+        tk.Label(quad, bg=COR_PAINEL, fg=COR_MUT, font=('Segoe UI', 9),
+                 text='Escolha na lista e clique em Aplicar (duplo clique '
+                      'também aplica).').pack(anchor='w', padx=14)
+        lq = tk.Frame(quad, bg=COR_BG, bd=1, relief='flat',
+                      highlightthickness=1, highlightbackground=COR_GRADE)
+        lq.pack(fill='x', padx=14, pady=(8, 6))
+        lb = tk.Listbox(lq, height=16, bg=COR_BG, fg=COR_TXT,
+                        selectbackground='#2563eb', bd=0,
+                        highlightthickness=0,
+                        font=('Segoe UI', 10), activestyle='none',
+                        exportselection=False)
+        sb = ttk.Scrollbar(lq, orient='vertical', command=lb.yview)
+        lb.configure(yscrollcommand=sb.set)
+        sb.pack(side='right', fill='y')
+        lb.pack(side='left', fill='both', expand=True)
+        for s in Steer.SAIDAS:
+            lb.insert('end', ROTULOS_SAI.get(s, s))
+        idx = list(Steer.SAIDAS).index(atual) if atual in Steer.SAIDAS \
+            else len(Steer.SAIDAS) - 1
+        lb.selection_set(idx)
+        lb.see(idx)
+
+        def aplicar(_e=None, fechar=True):
+            sel = lb.curselection()
+            if sel:
+                saida = Steer.SAIDAS[sel[0]]
+                mapa[nome] = saida
+                if nome in self._mapa_vars:
+                    self._mapa_vars[nome].set(saida)
+                self.engine.set_mapa(mapa)
+                with self.engine._lock:
+                    self.engine._logs.append('mapa: %s → %s'
+                                             % (nome, saida))
+            if fechar:
+                win.destroy()
+
+        rodape = tk.Frame(quad, bg=COR_PAINEL)
+        rodape.pack(fill='x', padx=14, pady=(2, 12))
+        self._botao(rodape, 'Aplicar', aplicar).pack(side='left')
+        self._botao(rodape, 'Cancelar', win.destroy).pack(side='right')
+        lb.bind('<Double-Button-1>', aplicar)
+        lb.bind('<Return>', aplicar)
+        lb.bind('<space>', aplicar)
+        win.bind('<Escape>', lambda _e: win.destroy())
+        # centrar sobre a janela principal e capturar DEPOIS de visivel
+        win.update_idletasks()
+        win.withdraw()
+        win.deiconify()
+        try:
+            px, py = self.root.winfo_rootx(), self.root.winfo_rooty()
+            pw = self.root.winfo_width() or 900
+            ph = self.root.winfo_height() or 600
+            ww, wh = win.winfo_reqwidth(), win.winfo_reqheight()
+            win.geometry('+%d+%d' % (px + max(0, (pw - ww) // 2),
+                                     py + max(0, (ph - wh) // 3)))
+        except Exception:
+            pass
+        win.wait_visibility()
+        win.lift()
+        win.grab_set()
+        win.focus_set()
+        lb.focus_set()
+    def _montar_presets(self):
+        quad = tk.LabelFrame(self._scroll_frame, text=' Presets de configuração ',
+                             bg=COR_PAINEL, fg=COR_TXT, bd=1, relief='flat')
+        quad.pack(fill='x', padx=12, pady=6)
+        linha = tk.Frame(quad, bg=COR_PAINEL)
+        linha.pack(fill='x', padx=10, pady=6)
+        tk.Label(linha, text='Preset:', bg=COR_PAINEL, fg=COR_MUT,
+                 font=('Segoe UI', 10)).pack(side='left')
+        self._var_preset = tk.StringVar()
+        self._preset_combo = ttk.Combobox(linha, textvariable=self._var_preset,
+                                          values=presets_lista(), width=28,
+                                          state='readonly')
+        self._preset_combo.pack(side='left', padx=(8, 4))
+        self._preset_combo.bind('<<ComboboxSelected>>', self._cb_preset)
+        self._botao(linha, 'Salvar atual como preset…',
+                    self._preset_salvar).pack(side='left', padx=6)
+        self._botao(linha, 'Excluir preset',
+                    self._preset_excluir).pack(side='left', padx=6)
+        tk.Label(linha, text='selecionar na lista carrega a config na hora',
+                 bg=COR_PAINEL, fg=COR_MUT, font=('Segoe UI', 9)).pack(
+            side='left', padx=10)
+
+    def _aplicar_cfg_ui(self):
+        """Reflete o self.cfg atual em todos os widgets e no motor."""
+        for sec in ('direcao', 'direcao_volante'):
+            self.v_modo[sec].set(self.cfg[sec]['modo'])
+            self.v_inv[sec].set(
+                'invertida' if self.cfg[sec]['inverter'] < 0 else 'normal')
+        disp = self.cfg.get('dispositivo', {}).get('modo', 'xbox')
+        self._var_disp.set(disp)
+        for (sec, chave) in list(self._sliders):
+            var, val_var = self._sliders[(sec, chave)]
+            var.set(float(self.cfg.get(sec, {}).get(chave, var.get())))
+            self._cb_slider(sec, chave, var.get(), val_var, aplicar=False)
+        s_cfg = self.cfg.get('sensor', {})
+        eg = int(s_cfg.get('eixo_giro', -1))
+        if hasattr(self, '_var_eixo'):
+            self._var_eixo.set(['x', 'y', 'z'][min(2, max(0, eg))]
+                               if eg >= 0 else 'auto')
+        if hasattr(self, '_var_salvar_cal'):
+            self._var_salvar_cal.set(
+                'sim' if int(s_cfg.get('salvar_calibracao', 1)) else 'nao')
+        mapa = self.cfg.get('mapa_botoes', {})
+        for nome, var in self._mapa_vars.items():
+            var.set(mapa.get(nome, Steer.MAPA_PADRAO.get(nome, 'none')))
+        self.engine.set_mapa(mapa)
+        vol = self.cfg.get('volante', {})
+        self.engine.set_pedais(vol.get('freio_zona_morta', 20.0),
+                               vol.get('freio_curva', 1.0),
+                               vol.get('acel_zona_morta', 20.0),
+                               vol.get('acel_curva', 1.0),
+                               vol.get('freio_repouso', 0.0),
+                               vol.get('acel_repouso', 0.0))
+        self.engine.set_modo(disp)
+        self._atualizar_visibilidade()
+
+    def _restaurar_padroes(self):
+        if not messagebox.askyesno(
+                'Restaurar padrões',
+                'Volta direção, sensor, volante, mapa de botões e o modo do '
+                'dispositivo para os padrões de fábrica?'):
+            return
+        nova = copy.deepcopy(M.DEFAULTS)
+        # trocas de uma chave só (atômicas p/ a thread do motor, que lê
+        # cfg['direcao'] em loop — o cfg.clear() antigo deixava o dict vazio
+        # no meio e podia matar o motor com KeyError):
+        self.cfg['sensor'] = dict(nova['sensor'])       # {} = eixo/sinal auto
+        self.cfg['mapa_botoes'] = dict(Steer.MAPA_PADRAO)
+        for sec in ('direcao', 'direcao_volante', 'volante', 'dispositivo'):
+            self.cfg.setdefault(sec, {}).update(nova.get(sec, {}))
+        self._aplicar_cfg_ui()
+        self.engine.reconectar()   # recalibra com as notas de fábrica
+        with self.engine._lock:
+            self.engine._logs.append('config restaurada para os padrões')
+
+    def _preset_salvar(self):
+        nome = simpledialog.askstring(
+            'Salvar preset', 'Nome do preset (vai para a lista):',
+            parent=self.root)
+        if nome is None:
+            return
+        nome = nome.strip().replace('/', '-').replace('\\', '-')
+        if not nome:
+            return
+        caminho = preset_path(nome)
+        if os.path.exists(caminho) and not messagebox.askyesno(
+                'Salvar preset', 'Preset "%s" já existe. Sobrescrever?' % nome):
+            return
+        try:
+            salvar_config(self.cfg, caminho)
+        except OSError as e:
+            with self.engine._lock:
+                self.engine._logs.append('erro ao salvar preset: %s' % e)
+            return
+        self._preset_combo['values'] = presets_lista()
+        self._var_preset.set(nome)
+        with self.engine._lock:
+            self.engine._logs.append('preset "%s" salvo' % nome)
+
+    def _cb_preset(self, _ev=None):
+        nome = self._var_preset.get()
+        if not nome or not os.path.exists(preset_path(nome)):
+            return
+        nova = M.load_cfg(preset_path(nome))
+        self.cfg.clear()
+        self.cfg.update(nova)
+        self._aplicar_cfg_ui()
+        self.engine.reconectar()   # recalibra com a config do preset
+        with self.engine._lock:
+            self.engine._logs.append('preset "%s" carregado' % nome)
+
+    def _preset_excluir(self):
+        nome = self._var_preset.get()
+        if not nome:
+            return
+        if not messagebox.askyesno('Excluir preset',
+                                   'Apagar o preset "%s"?' % nome):
+            return
+        try:
+            os.remove(preset_path(nome))
+        except OSError:
+            pass
+        self._var_preset.set('')
+        self._preset_combo['values'] = presets_lista()
+        with self.engine._lock:
+            self.engine._logs.append('preset "%s" excluído' % nome)
+
+    def _montar_logs(self):
+        self.txt_logs = tk.Text(self.root, height=4, bg=COR_PAINEL, fg=COR_MUT,
+                                bd=0, highlightthickness=1,
+                                highlightbackground=COR_GRADE,
+                                font=('Consolas', 9), state='disabled')
+        self.txt_logs.pack(fill='x', padx=12, pady=(4, 10))
+
+    # ---------------------------------------------------------- callbacks
+    def _cb_modo(self, sec):
+        self.cfg[sec]['modo'] = self.v_modo[sec].get()
+
+    def _cb_dispositivo(self, _ev=None):
+        modo = self._var_disp.get()
+        self.cfg.setdefault('dispositivo', {})['modo'] = modo
+        self.engine.set_modo(modo)
+        self._atualizar_visibilidade()
+        self._aplicar_cfg_ui()
+
+    def _cb_inverter(self, sec):
+        valor = -1.0 if self.v_inv[sec].get() == 'invertida' else 1.0
+        self.cfg[sec]['inverter'] = valor
+        if M.cfg_direcao(self.cfg) is self.cfg[sec]:
+            self.cfg.setdefault('sensor', {})['inverter'] = valor
+            if self.engine.sensor:
+                self.engine.sensor.inverter = valor
+
+    def _cb_slider(self, sec, chave, valor, var, aplicar=True):
+        try:
+            valor = float(valor)
+        except (TypeError, ValueError):
+            return
+        if var:
+            var.set('%g' % valor)
+        if sec in self.cfg:
+            self.cfg[sec][chave] = valor
+        if sec == 'volante':
+            vol = self.cfg['volante']
+            self.engine.set_pedais(
+                vol.get('freio_zona_morta', 20.0),
+                vol.get('freio_curva', 1.0),
+                vol.get('acel_zona_morta', 20.0),
+                vol.get('acel_curva', 1.0),
+                vol.get('freio_repouso', 0.0),
+                vol.get('acel_repouso', 0.0))
+            return
+        sensor = self.engine.sensor
+        if aplicar and sensor and sec == 'sensor':
+            if chave == 'peso_accelerometro':
+                sensor.fusao = valor
+            elif chave == 'gyro_dps_por_lsb':
+                sensor.gyro_scale = valor
+
+    def _cb_mapa(self, nome, var):
+        mapa = self.cfg.setdefault('mapa_botoes', {})
+        mapa[nome] = var.get()
+        self.engine.set_mapa(mapa)
+
+    def _toggle_motor(self):
+        eng = self.engine
+        if eng.is_alive():
+            eng.encerrar()
+            eng.join(timeout=2.5)
+            self.btn_motor.config(text='Ligar motor')
+        else:
+            novo = Engine(self.cfg)
+            self.engine = novo
+            self.btn_motor.config(text='Parar motor')
+            novo.start()
+
+    def _salvar(self):
+        try:
+            salvar_config(self.cfg)
+            with self.engine._lock:
+                self.engine._logs.append('config salva em %s' % CONF_PATH)
+        except OSError as e:
+            with self.engine._lock:
+                self.engine._logs.append('erro ao salvar: %s' % e)
+
+    def _fechar(self):
+        self.engine.encerrar()
+        try:
+            self.engine.join(timeout=2.5)
+        except RuntimeError:
+            pass
+        self.root.destroy()
+
+    # ---------------------------------------------------------- desenho
+    def _tick(self):
+        st = self.engine.snapshot()
+        self.historico.append(st['angle'])
+        self._desenhar()
+        self._atualizar_texto(st)
+        self._realce_botoes(st.get('botoes'), st.get('virtual'))
+        self.root.after(33, self._tick)
+
+    def _realce_botoes(self, ativos, ligado):
+        """Acende em azul o botão pressionado no desenho do DualSense."""
+        if not ligado:
+            ativos = ()
+        novo = frozenset(ativos or ())
+        if novo == self._botoes_ultimo:
+            return
+        self._botoes_ultimo = novo
+        if not self._mapa_canv or not self._mapa_canv.winfo_exists():
+            return
+        if self._mapa_modo == 'imagem':
+            for nome, item in self._mapa_vis.items():
+                try:
+                    if nome in novo:
+                        self._mapa_canv.itemconfig(item, outline='#3d8bfa',
+                                                   width=3, dash='')
+                    else:
+                        self._mapa_canv.itemconfig(
+                            item, outline='#3d455e', width=1, dash=(3, 2))
+                except Exception:
+                    pass
+            return
+        for nome, item in self._mapa_vis.items():
+            cor = '#2563eb' if nome in novo else self._mapa_base.get(
+                nome, '#2b3550')
+            try:
+                self._mapa_canv.itemconfig(item, fill=cor)
+            except Exception:
+                pass
+
+    def _atualizar_texto(self, st):
+        self.lbl_status.config(text=st['status'], fg=st['cor'])
+        disp = self.engine.cfg.get('dispositivo', {}).get('modo', 'xbox')
+        extra = ' · %s · %s (%s)' % (
+            st['hidraw'], Steer.PERFIL.get(disp, Steer.PERFIL['xbox'])['name'],
+            disp) if st['virtual'] else \
+                ' · %s' % st['hidraw'] if st['hidraw'] else ''
+        self.lbl_hid.config(text='%s%.0f rel/s' % (extra + ' · ', st['rps'])
+                            if st['rps'] else extra)
+        eix_novo = st.get('eixo_detectado')
+        if eix_novo is not None:
+            if hasattr(self, '_var_eixo'):
+                self._var_eixo.set(['x', 'y', 'z'][min(2, max(0, eix_novo))])
+            with self.engine._lock:
+                self.engine.state['eixo_detectado'] = None
+        pr = st.get('pedal_rest', (0.0, 0.0))
+        if pr and hasattr(self, 'lbl_pedais'):
+            self.lbl_pedais.config(
+                text='repouso detectado: freio %.0f / acel %.0f (subtraído)'
+                     % (pr[0], pr[1]))
+        logs = self.engine.logs()
+        self.txt_logs.config(state='normal')
+        self.txt_logs.delete('1.0', 'end')
+        if logs:
+            self.txt_logs.insert('end', '\n'.join(logs[-5:]))
+        self.txt_logs.config(state='disabled')
+
+    def _rrect(self, c, x1, y1, x2, y2, r=10, fill='#0d1118',
+               outline=None, width=1):
+        """Retângulo com cantos arredondados (polígono suavizado)."""
+        r = max(0.0, min(r, (x2 - x1) / 2.0, (y2 - y1) / 2.0))
+        pts = (x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r,
+               x2, y2, x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r,
+               x1, y1 + r, x1, y1)
+        kw = {'fill': fill, 'outline': outline or fill,
+              'width': width, 'smooth': True}
+        return c.create_polygon(*pts, **kw)
+
+    def _desenhar(self):
+        c = self.canv
+        c.delete('all')
+        w = c.winfo_width() or 940
+        h = c.winfo_height() or 290
+        st = self.engine.snapshot()
+        amax = max(5.0, float(M.cfg_direcao(self.cfg).get(
+            'angulo_max', 45.0)))
+        gir_max = max(90.0, float(self.cfg.get('volante', {}).get(
+            'gir_max', 900.0)))
+        frei, acel = st.get('pedais') or (0.0, 0.0)
+
+        # ---- coluna do volante (direita) ----
+        colx = w - 280
+        if self._wheel_pil:
+            sz = max(120, min(164, h - 140))
+            rotd = max(-gir_max, min(gir_max, st['angle'] / amax * gir_max))
+            st_rod = '%+.0f°' % rotd
+            if self._wheel_rot is None or \
+                    abs(rotd - self._wheel_rot) > 0.5 or sz != self._wheel_sz:
+                self._wheel_rot = rotd
+                self._wheel_sz = sz
+                res = getattr(Image, 'Resampling', Image)
+                rot = self._wheel_pil.rotate(-rotd, resample=res.BICUBIC)
+                self._wheel_tk = ImageTk.PhotoImage(
+                    rot.resize((sz, sz), Image.LANCZOS))
+            wx = colx + (w - colx) // 2
+            wy = sz // 2 + 22
+            c.create_image(wx, wy, image=self._wheel_tk)
+            c.create_text(wx, wy + sz / 2 + 14, text='volante ' + st_rod,
+                          fill=COR_TXT, font=('Consolas', 12, 'bold'))
+            c.create_text(wx, wy + sz / 2 + 29,
+                          text='rotação total ±%.0f°' % gir_max,
+                          fill=COR_MUT, font=('Segoe UI', 8))
+        else:
+            colx = w - 30       # sem imagem: layout anterior
+
+        # ---- barras dos pedais (esquerda, HUD de corrida) ----
+        barw, gap = 44, 16
+        px0 = 18
+        pt = 34
+        pb = h - 62
+        if pb - pt >= 60:
+            for x, val, cor, rot in ((px0, acel, COR_OK, 'R2 acel.'),
+                                     (px0 + barw + gap, frei, COR_FREIO,
+                                      'L2 freio')):
+                c.create_text(x + barw // 2, pt - 16, text=rot,
+                              fill=COR_MUT, font=('Segoe UI', 9))
+                self._rrect(c, x, pt, x + barw, pb, 10,
+                            fill='#0d1118', outline=COR_GRADE)
+                fh = (pb - pt) * max(0.0, min(1.0, val))
+                if fh > 2.0:
+                    self._rrect(c, x + 3, pb - fh, x + barw - 3, pb - 3, 7,
+                                fill=cor)
+                c.create_text(x + barw // 2, pb + 16,
+                              text='%3.0f%%' % (val * 100.0),
+                              fill=cor, font=('Consolas', 12, 'bold'))
+            midx = px0 + 2 * barw + gap
+        else:
+            midx = px0
+
+        # ---- card central: histórico de ângulo ----
+        mx0, mx1 = midx + 22, colx - 18
+        if mx1 - mx0 >= 140:
+            gy0, gy1 = 26, h - 152
+            self._rrect(c, mx0, gy0, mx1, gy1, 12, fill='#0d1118',
+                        outline=COR_GRADE)
+            meio = (gy0 + gy1) / 2
+            c.create_line(mx0 + 10, meio, mx1 - 10, meio,
+                          fill='#5a6a8a', dash=(4, 4))
+            c.create_text(mx0 + 12, gy0 + 6, anchor='nw',
+                          text='ângulo · últimos ~%ds' % (JANELA_HIST / 30.0),
+                          fill=COR_MUT, font=('Segoe UI', 9))
+            c.create_text(mx1 - 12, gy0 + 6, anchor='ne',
+                          text='escala ±%.0f°' % amax,
+                          fill=COR_MUT, font=('Segoe UI', 9))
+            n = len(self.historico)
+            if n > 2:
+                passo_x = (mx1 - mx0 - 20) / (JANELA_HIST - 1.0)
+                pts = []
+                for i, a in enumerate(self.historico):
+                    x = mx1 - 10 - i * passo_x
+                    y = meio - max(-1.0, min(1.0, a / amax)) * \
+                        (gy1 - gy0) / 2 * 0.85
+                    pts.append(x)
+                    pts.append(y)
+                c.create_line(*pts, fill=COR_EIXO, width=2, smooth=True)
+
+            # ---- barra de esterço ----
+            by = gy1 + 18
+            bh = 26
+            nome_dev = Steer.PERFIL.get(
+                self.cfg.get('dispositivo', {}).get('modo', 'xbox'),
+                Steer.PERFIL['xbox'])['name']
+            c.create_text(mx0, by - 16, anchor='w', fill=COR_MUT,
+                          font=('Segoe UI', 9),
+                          text='esterço no device virtual "%s": %+05.1f%%'
+                               % (nome_dev, st['out'] * 100.0))
+            self._rrect(c, mx0, by, mx1, by + bh, 12, fill='#0d1118',
+                        outline=COR_GRADE, width=2)
+            c.create_line((mx0 + mx1) / 2, by, (mx0 + mx1) / 2, by + bh,
+                          fill=COR_GRADE)
+            kx = (mx0 + mx1) / 2 + max(-1.0, min(1.0, st['out'])) * \
+                (mx1 - mx0 - 30) / 2
+            c.create_oval(kx - 12, by + 1, kx + 12, by + bh - 1,
+                          fill=COR_NEEDLE, outline='#23282f')
+            c.create_text(mx0 + 6, by + bh + 4, text='esquerda', anchor='nw',
+                          fill=COR_MUT, font=('Segoe UI', 9))
+            c.create_text(mx1 - 6, by + bh + 4, text='direita', anchor='ne',
+                          fill=COR_MUT, font=('Segoe UI', 9))
+            # ---- telemetria em números ----
+            ny = by + bh + 30
+            if ny < h - 12:
+                fnum = 13 if mx1 - mx0 >= 640 else 11
+                c.create_text(mx0, ny, anchor='w', fill=COR_TXT,
+                              font=('Consolas', fnum, 'bold'),
+                              text='ângulo %+07.2f°   esterço %+05.1f%%   '
+                                   'giro %+07.1f°/s   |a| %.2f g'
+                                   % (st['angle'], st['out'] * 100.0,
+                                      st['dps'], st['ga']))
+                c.create_text(mx0, ny + 17, anchor='w', fill=COR_MUT,
+                              font=('Segoe UI', 9),
+                              text='acel (x %+0.2f, y %+0.2f, z %+0.2f g)'
+                                   % st['accel_g'])
+
+def a_linha(i):
+    """Linha do grid dado o índice do slider (3 por linha)."""
+    return i // 3
+
+
+def main():
+    ap = argparse.ArgumentParser(description='GUI do tilt2drive')
+    ap.add_argument('--selftest', action='store_true')
+    args = ap.parse_args()
+    cfg = M.load_cfg(CONF_LER)
+    app = App(cfg)
+    if args.selftest:
+        for _ in range(8):
+            app.root.update()
+            time.sleep(0.02)
+        st = app.engine.snapshot()
+        print('selftest OK — status: %r | hidraw: %r'
+              % (st['status'], st['hidraw']))
+        app._fechar()
+        return
+    app.root.mainloop()
+
+
+if __name__ == '__main__':
+    main()

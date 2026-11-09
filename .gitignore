@@ -1,0 +1,9 @@
+# arte derivada de marca (fica no disco local, não no repo)
+assets/icons/dualsense.png
+
+# lixo local
+__pycache__/
+*.pyc
+*.log
+# confs e presets são do usuário, nunca do repo
+*.conf

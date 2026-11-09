@@ -98,6 +98,8 @@ DEFAULTS = {
     },
     'volante': {
         'gir_max': 900.0,          # rotação total do volante virtual (graus)
+        'assinatura': 'generico',  # generico | g29 = parece "Logitech G29"
+                                   # (nome/VID/PID de G29; eixos Y=acel/Z=freio)
         'freio_zona_morta': 20.0,  # curso morto do freio L2 em repouso (0-80)
         'acel_zona_morta': 20.0,   # curso morto do acelerador R2 (0-80)
         'freio_curva': 1.0,        # >1 = mais curso no pé leve; <1 = no fundo
@@ -141,6 +143,8 @@ class Steer:
                   Wine classificam por nome): ABS_X = direção de verdade,
                   ABS_Y = freio, ABS_Z = acelerador - sem caminho de stick,
                   com retorno ao centro imediato.
+      'volante_g29' - igual ao anterior com nome/VID/PID do Logitech G29
+                  (volante.get('assinatura') == 'g29'): preset nativo do jogo.
 
     cfg['mapa_botoes']: cada entrada do DualSense -> saída do device virtual
     ('a','b','x','y','lb','rb','back','start','ls','rs','guide',
@@ -162,6 +166,16 @@ class Steer:
             'eixos': {ABS_X: (-32768, 32767),          # direção
                       ABS_Y: (0, 1023),                # freio
                       ABS_Z: (0, 1023),                # acelerador
+                      ABS_HAT0X: (-1, 1), ABS_HAT0Y: (-1, 1)},
+        },
+        'volante_g29': {
+            # mesmo volante com a identidade do Logitech G29 real (modo PC):
+            # o jogo carrega o preset nativo dele (Y=acelerador, Z=freio)
+            'name': 'Logitech G29 Driving Force Racing Wheel',
+            'bus': 0x03, 'vid': 0x046D, 'pid': 0xC24F, 'ver': 0x0114,
+            'eixos': {ABS_X: (-32768, 32767),          # direção
+                      ABS_Y: (0, 1023),                # acelerador (layout real)
+                      ABS_Z: (0, 1023),                # freio (layout real)
                       ABS_HAT0X: (-1, 1), ABS_HAT0Y: (-1, 1)},
         },
     }
@@ -211,8 +225,17 @@ class Steer:
         'cima': 'up', 'baixo': 'down', 'esquerda': 'left', 'direita': 'right',
     }
 
+    @staticmethod
+    def perfil_de(modo, volante=None):
+        """Chave de PERFIL p/ (modo cfg, assinatura do volante). O modo
+        'volante' com assinatura 'g29' vira o device Logitech G29."""
+        if modo == 'volante' and isinstance(volante, dict) and \
+                volante.get('assinatura') == 'g29':
+            return 'volante_g29'
+        return modo if modo in ('xbox', 'volante') else 'xbox'
+
     def __init__(self, modo='xbox', mapa=None, volante=None):
-        self.modo = modo if modo in self.PERFIL else 'xbox'
+        self.modo = self.perfil_de(modo, volante)
         self._pedais = {
             # pedal: (zona_morta, curva, repouso)
             'freio': (20.0, 1.0, 0.0),

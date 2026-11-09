@@ -258,6 +258,14 @@ TR = {
         'Tema': 'Theme', 'Escuro': 'Dark', 'Claro': 'Light',
         'Português (Brasil)': 'Portuguese (Brazil)',
         'English': 'English',
+        # assinatura do volante
+        'Assinatura do volante': 'Wheel identity',
+        'Tradicional': 'Traditional',
+        'Logitech G29': 'Logitech G29',
+        'Tema/idioma reiniciam o app; assinatura recria o volante '
+        'virtual.':
+            'Theme/language restart the app; wheel identity recreates '
+            'the virtual wheel.',
         'engine: %r': 'engine: %r',
         'mapa: %s → %s': 'map: %s → %s',
         # status residuais do motor
@@ -584,7 +592,8 @@ class Engine(threading.Thread):
                                 self.state['virtual'] = True
                                 self._logs.append(
                                     'dispositivo virtual: %s (modo %s)'
-                                    % (steer.PERFIL[modo]['name'], modo))
+                                    % (steer.PERFIL[steer.modo]['name'],
+                                       steer.modo))
                         except OSError as e:
                             steer = None
                             with self._lock:
@@ -597,9 +606,10 @@ class Engine(threading.Thread):
                 if self._trocar_modo:
                     self._trocar_modo = False
                     novo = self.cfg.get('dispositivo', {}).get('modo', 'xbox')
-                    if steer is None or steer.modo != novo:
+                    alvo = M.Steer.perfil_de(novo, self.cfg.get('volante'))
+                    if steer is None or steer.modo != alvo:
                         log_msg = 'dispositivo virtual: %s (modo %s)' % (
-                            M.Steer.PERFIL[novo]['name'], novo)
+                            M.Steer.PERFIL[alvo]['name'], alvo)
                         try:
                             if steer is not None:
                                 steer.close()
@@ -768,6 +778,7 @@ modo = {disp_modo}      # xbox | volante
 
 [volante]
 # config do modo volante ("Tilt2Drive Racing Wheel")
+assinatura = {sig}      # generico | g29 (parece Logitech G29 p/ o jogo)
 gir_max = {gir_max}
 freio_zona_morta = {f_dz}
 acel_zona_morta = {a_dz}
@@ -795,6 +806,7 @@ idioma = {ui_idioma}
            sinal=float(s.get('sinal_giro', 1.0)),
            salv=int(s.get('salvar_calibracao', 1)),
            disp_modo=disp.get('modo', 'xbox'), mapa=linhas_mapa,
+           sig=str(vol.get('assinatura', 'generico')),
            gir_max=float(vol.get('gir_max', 900.0)),
            f_dz=float(vol.get('freio_zona_morta', 20.0)),
            a_dz=float(vol.get('acel_zona_morta', 20.0)),
@@ -1543,6 +1555,8 @@ class App:
                                       _t('Claro'): 'claro'})
     _LANG_LBL = staticmethod(lambda: {_t('Português (Brasil)'): 'pt',
                                       _t('English'): 'en'})
+    _SIG_LBL = staticmethod(lambda: {_t('Tradicional'): 'generico',
+                                     _t('Logitech G29'): 'g29'})
 
     def _montar_ajustes(self):
         """Aba 'Ajustes': só o que é do software (tema e idioma)."""
@@ -1570,14 +1584,30 @@ class App:
                         if k == ui.get('idioma')), list(inv_lang)[0]))
         self._menu(linha, list(inv_lang), self._var_lang_ui,
                    self._cb_idioma).pack(side='left', padx=(10, 0))
-        ctk.CTkLabel(quad, text=_t('Escolhe tema/idioma; o app reinicia '
-                                   'para aplicar.'),
+        inv_sig = self._SIG_LBL()
+        linha2 = ctk.CTkFrame(quad, fg_color='transparent')
+        linha2.pack(fill='x', padx=12, pady=(4, 0))
+        ctk.CTkLabel(linha2, text=_t('Assinatura do volante'),
+                     text_color=COR_MUT, font=F_SUP).pack(side='left')
+        self._var_sig_ui = tk.StringVar(
+            value=next((lbl for lbl, k in inv_sig.items()
+                        if k == self.cfg.setdefault('volante', {}).get(
+                            'assinatura', 'generico')), list(inv_sig)[0]))
+        self._menu(linha2, list(inv_sig), self._var_sig_ui,
+                   self._cb_assin).pack(side='left', padx=(10, 0))
+        ctk.CTkLabel(quad, text=_t('Tema/idioma reiniciam o app; assinatura '
+                                   'recria o volante virtual.'),
                      text_color=COR_MUT, font=F_SUP) \
             .pack(fill='x', padx=12, pady=(4, 12))
 
     def _cb_tema(self, valor):
         self.cfg.setdefault('ui', {})['tema'] = \
             self._TEMA_LBL().get(valor, 'escuro')
+        self._reiniciar()
+
+    def _cb_assin(self, valor):
+        self.cfg.setdefault('volante', {})['assinatura'] = \
+            self._SIG_LBL().get(valor, 'generico')
         self._reiniciar()
 
     def _cb_idioma(self, valor):

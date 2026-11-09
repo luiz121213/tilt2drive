@@ -27,7 +27,8 @@ import fcntl
 import struct
 from collections import deque
 import tkinter as tk
-from tkinter import ttk, messagebox, simpledialog
+from tkinter import messagebox, simpledialog
+import customtkinter as ctk
 from importlib.machinery import SourceFileLoader
 
 # ioctl para tomada exclusiva de um node evdev (o kernel solta
@@ -110,17 +111,28 @@ ROTULOS_SAI = {'a': 'Botão A (xbox)', 'b': 'Botão B (xbox)',
                'k_left': 'Seta ← (teclado)',
                'k_right': 'Seta → (teclado)'}
 
-COR_BG = '#0d1117'
-COR_PAINEL = '#151b26'
-COR_TXT = '#e2e8f5'
-COR_MUT = '#8a97b4'
-COR_EIXO = '#3d8bfa'
-COR_NEEDLE = '#ffd166'
-COR_OK = '#4ade80'
-COR_WARN = '#fbbf24'
-COR_ERR = '#f87171'
-COR_FREIO = '#f05252'
-COR_GRADE = '#29344a'
+# ---- tema "F1": carbono + vermelho #e10600 ----
+COR_BG = '#0a0a0e'        # carbono (fundo)
+COR_PAINEL = '#15161c'    # cards / header
+COR_PAINEL2 = '#1b1c24'   # sub-cards
+COR_CARD = '#101116'      # painel interno do HUD
+COR_ITEM = '#26272f'      # trilhas/controles
+COR_TXT = '#f5f5f7'
+COR_MUT = '#9aa0ad'
+COR_GRADE = '#2a2b33'     # bordas
+COR_ACAO = '#e10600'      # vermelho F1: destaque geral
+COR_HOVER = '#c00500'
+COR_EIXO = '#e10600'      # curva de esterço / sliders
+COR_NEEDLE = '#ffcf3f'
+COR_OK = '#00c56f'
+COR_WARN = '#ffcf3f'
+COR_ERR = '#ff4d40'
+COR_FREIO = '#e10600'
+F_LOGO = ('DejaVu Sans Condensed', 21, 'bold', 'italic')
+F_TIT = ('DejaVu Sans Condensed', 12, 'bold')
+F_TXT = ('DejaVu Sans Condensed', 12)
+F_SUP = ('DejaVu Sans Condensed', 11)
+F_MONO = ('DejaVu Sans Mono', 11)
 
 ACC_G = 8192.0          # LSB por g no DualSense
 JANELA_HIST = 260       # amostras do gráfico (~8,5 s a 30 Hz)
@@ -667,15 +679,17 @@ def preset_path(nome):
 class App:
     def __init__(self, cfg):
         self.cfg = cfg
-        self.root = tk.Tk()
+        ctk.set_appearance_mode('dark')
+        self.root = ctk.CTk()
         self.root.title('Tilt2Drive — Direção por giroscópio (DualSense)')
-        self.root.configure(bg=COR_BG)
-        self.root.minsize(760, 520)
-        self.root.geometry('1024x780')
+        self.root.minsize(900, 640)
+        self.root.geometry('1180x860')
+        self.root.configure(fg_color=COR_BG)
         self.historico = deque(maxlen=JANELA_HIST)
         self._sliders = {}
 
         self.engine = Engine(self.cfg)
+        self._slider_w = {}   # widgets CTkSlider por (seção, chave)
         # volante animado + ícones dos botões (imagens locais, via Pillow)
         self._wheel_pil = None
         self._wheel_tk = None
@@ -696,10 +710,8 @@ class App:
         self.icone = lambda nome: self._icones.get(nome)
         self._montar_toolbar()
         self._montar_canvas()
-        # status e logs empacotados ANTES do scroll: assim a coluna de
-        # configurações usa a largura toda (sliders alinhados, sem cortes)
         self._montar_logs()
-        self._montar_scroll()
+        self._montar_tabs()
         self._montar_config()
         self._montar_presets()
         self.engine.start()
@@ -708,79 +720,86 @@ class App:
         self.root.after(60, self._tick)
 
     # --------------------------------------------------------------- UI
-    def _botao(self, pai, texto, cb):
-        return tk.Button(pai, text=texto, command=cb, bg='#232b3a', fg=COR_TXT,
-                         activebackground='#2e384e', activeforeground=COR_TXT,
-                         relief='flat', padx=10, pady=4, takefocus=0)
+    def _botao(self, pai, texto, cb, prim=False):
+        if prim:
+            return ctk.CTkButton(pai, text=texto, command=cb, corner_radius=8,
+                                 height=32, font=F_TIT,
+                                 fg_color=COR_ACAO, hover_color=COR_HOVER,
+                                 text_color='#ffffff')
+        return ctk.CTkButton(pai, text=texto, command=cb, corner_radius=8,
+                             height=32, font=F_SUP,
+                             fg_color=COR_PAINEL2, hover_color=COR_ITEM,
+                             border_width=1, border_color=COR_GRADE,
+                             text_color=COR_TXT)
 
     def _montar_toolbar(self):
-        bar = tk.Frame(self.root, bg=COR_BG)
-        bar.pack(fill='x', padx=12, pady=(10, 4))
-        self.lbl_status = tk.Label(bar, text='iniciando...', fg=COR_MUT,
-                                   bg=COR_BG, font=('Segoe UI', 12, 'bold'))
+        # listra fina vermelha no topo (assinatura de transmissão F1)
+        tk.Frame(self.root, bg=COR_ACAO, height=3).pack(fill='x')
+        bar = ctk.CTkFrame(self.root, corner_radius=0, fg_color=COR_PAINEL,
+                           height=58)
+        bar.pack(fill='x')
+        bar.pack_propagate(False)
+        self.lbl_logo1 = ctk.CTkLabel(bar, text='TILT2', font=F_LOGO,
+                                      text_color=COR_TXT)
+        self.lbl_logo1.pack(side='left', padx=(18, 0))
+        self.lbl_logo2 = ctk.CTkLabel(bar, text='DRIVE', font=F_LOGO,
+                                      text_color=COR_ACAO)
+        self.lbl_logo2.pack(side='left')
+        pill = ctk.CTkFrame(bar, fg_color=COR_PAINEL2, corner_radius=16,
+                            border_width=1, border_color=COR_GRADE)
+        pill.pack(side='left', padx=(18, 0), pady=10)
+        linha_p = ctk.CTkFrame(pill, fg_color='transparent')
+        linha_p.pack(fill='both', expand=True, padx=12, pady=4)
+        self.lbl_status = ctk.CTkLabel(linha_p, text='iniciando...',
+                                       text_color=COR_MUT, font=F_TXT)
         self.lbl_status.pack(side='left')
-        self.lbl_hid = tk.Label(bar, text='', fg=COR_MUT, bg=COR_BG,
-                                font=('Segoe UI', 9))
-        self.lbl_hid.pack(side='left', padx=(14, 0))
-        self.btn_motor = self._botao(bar, 'Parar motor', self._toggle_motor)
-        self.btn_motor.pack(side='right', padx=(6, 0))
-        self._botao(bar, 'Salvar config', self._salvar).pack(side='right',
-                                                             padx=(6, 0))
+        self.lbl_hid = ctk.CTkLabel(linha_p, text='', text_color=COR_MUT,
+                                    font=('DejaVu Sans Mono', 10))
+        self.lbl_hid.pack(side='left', padx=(12, 0))
+        self.lbl_ign = ctk.CTkLabel(bar, text='IGNORAR CONTROLE',
+                                    text_color=COR_MUT, font=F_SUP)
+        self.lbl_ign.pack(side='right', padx=(12, 16))
+        self._sw_ignorar = ctk.CTkSwitch(
+            bar, text='', command=self._cb_ignorar, width=46,
+            progress_color=COR_ACAO, fg_color=COR_ITEM,
+            button_color='#f5f5f7')
+        self._sw_ignorar.pack(side='right', padx=(8, 0))
+        self.btn_motor = self._botao(bar, 'PARAR MOTOR', self._toggle_motor,
+                                     prim=True)
+        self.btn_motor.pack(side='right', padx=(10, 16))
+        self._botao(bar, 'Recalibrar',
+                    self.engine.recalibrar).pack(side='right', padx=(6, 6))
         self._botao(bar, 'Reconectar',
                     self.engine.reconectar).pack(side='right', padx=(6, 0))
-        self._botao(bar, 'Recalibrar',
-                    self.engine.recalibrar).pack(side='right', padx=(6, 0))
-        self._btn_ignorar = self._botao(
-            bar, 'Ignorar controle original: desligado', self._cb_ignorar)
-        self._btn_ignorar.pack(side='right', padx=(6, 0))
+        self._botao(bar, 'Salvar config', self._salvar).pack(side='right',
+                                                             padx=(6, 0))
 
     def _montar_canvas(self):
-        frame = tk.Frame(self.root, bg=COR_PAINEL, highlightthickness=1,
-                         highlightbackground=COR_GRADE)
-        frame.pack(fill='x', padx=12, pady=6)
-        self.canv = tk.Canvas(frame, bg=COR_BG, highlightthickness=0,
+        frame = ctk.CTkFrame(self.root, fg_color=COR_PAINEL, corner_radius=12,
+                             border_width=1, border_color=COR_GRADE)
+        frame.pack(fill='x', padx=12, pady=(10, 6))
+        self.canv = tk.Canvas(frame, bg=COR_CARD, highlightthickness=0,
                               height=300)
         self.canv.pack(fill='x', padx=2, pady=2, expand=True)
 
-    def _montar_scroll(self):
-        """Canvas rolável com todos os frames de config (janelas pequenas)."""
-        self._scroll = tk.Canvas(self.root, bg=COR_BG, highlightthickness=0)
-        barra = ttk.Scrollbar(self.root, orient='vertical',
-                              command=self._scroll.yview)
-        self._scroll.configure(yscrollcommand=barra.set)
-        self._scroll.pack(side='left', fill='both', expand=True)
-        barra.pack(side='right', fill='y')
-        self._scroll_frame = tk.Frame(self._scroll, bg=COR_BG)
-        self._scroll_window = self._scroll.create_window(
-            (0, 0), window=self._scroll_frame, anchor='nw')
-        self._scroll_frame.bind(
-            '<Configure>',
-            lambda _e: (self._scroll.configure(scrollregion=self._scroll.bbox('all')),
-                        self._ajustar_largura()))
-        self.root.bind('<Configure>', self._ajustar_largura)
-        for ev in ('<MouseWheel>', '<Button-4>', '<Button-5>'):
-            self._scroll.bind_all(ev, self._rolar)
-
-    def _ajustar_largura(self, _ev=None):
-        try:
-            w = self._scroll.winfo_width()
-            if w > 1:
-                self._scroll.itemconfig(self._scroll_window, width=w)
-        except Exception:
-            pass
-
-    def _rolar(self, ev):
-        d = ev.delta / 120.0 if ev.type == '4' or ev.delta else \
-            (-1 if ev.num == 4 else 1)
-        # Button-4/5 no Linux: num 4 = cima (sobe), 5 = baixo (desce)
-        if ev.num == 4:
-            d = 1
-        elif ev.num == 5:
-            d = -1
-        try:
-            self._scroll.yview_scroll(-int(d), 'units')
-        except Exception:
-            pass
+    def _montar_tabs(self):
+        """Coluna de configurações: abas CTk (Direção/Sensor/Botões/Presets)."""
+        self._tabs = ctk.CTkTabview(
+            self.root, fg_color=COR_PAINEL, corner_radius=12,
+            border_width=1, border_color=COR_GRADE,
+            segmented_button_selected_color=COR_ACAO,
+            segmented_button_selected_hover_color=COR_HOVER,
+            segmented_button_unselected_color=COR_PAINEL2,
+            segmented_button_unselected_hover_color=COR_ITEM,
+            text_color=COR_TXT)
+        self._tabs.pack(fill='both', expand=True, padx=12, pady=(4, 4))
+        self._tabs._segmented_button.configure(font=F_SUP)
+        for nome in ('Direção', 'Sensor', 'Botões', 'Presets'):
+            self._tabs.add(nome)
+        self._tab_dir = self._tabs.tab('Direção')
+        self._tab_sensor = self._tabs.tab('Sensor')
+        self._tab_mapa = self._tabs.tab('Botões')
+        self._tab_presets = self._tabs.tab('Presets')
 
     SLIDERS_CONDUCAO = (
         ('angulo_max', 'Ângulo máximo (graus)', 10, 90, 1),
@@ -797,115 +816,130 @@ class App:
         ('acel_curva', 'Acelerador: curva', 0.5, 2.0, 0.05),
     )
 
+    _DISP_LBL = {'CONTROLE (XBOX)': 'xbox', 'VOLANTE': 'volante'}
+
     def _montar_config(self):
         self._frames_cfg = {}
         self.v_modo = {}
         self.v_inv = {}
 
-        # ---- frame sempre visível: dispositivo + fábrica ----
-        quad = tk.LabelFrame(self._scroll_frame, text=' Dispositivo virtual ',
-                             bg=COR_PAINEL, fg=COR_TXT, bd=1, relief='flat')
-        quad.pack(fill='x', padx=12, pady=6)
-        topo = tk.Frame(quad, bg=COR_PAINEL)
-        topo.pack(fill='x', padx=10, pady=(8, 8))
+        # ---- aba Direção: card do dispositivo (seletor segmentado) ----
+        self._montar_mapa()          # mapa vive na aba Botões
+        quad = ctk.CTkFrame(self._tab_dir, fg_color=COR_PAINEL2,
+                            corner_radius=10)
+        quad.pack(fill='x', padx=10, pady=(10, 6))
+        topo = ctk.CTkFrame(quad, fg_color='transparent')
+        topo.pack(fill='x', padx=12, pady=(12, 8))
+        ctk.CTkLabel(topo, text='DISPOSITIVO VIRTUAL',
+                     font=F_TIT, text_color=COR_MUT).pack(side='left')
         self._var_disp = tk.StringVar(
             value='volante' if self.cfg.get('dispositivo', {}).get(
                 'modo') == 'volante' else 'xbox')
-        col = tk.Frame(topo, bg=COR_PAINEL)
-        col.pack(side='left')
-        tk.Label(col, text='Modo escolhido (as configurações abaixo se '
-                           'adaptam)', bg=COR_PAINEL, fg=COR_MUT,
-                 font=('Segoe UI', 9)).pack(anchor='w')
-        c = ttk.Combobox(col, textvariable=self._var_disp, width=10,
-                         values=['xbox', 'volante'], state='readonly')
-        c.pack(anchor='w', pady=2)
-        c.bind('<<ComboboxSelected>>', self._cb_dispositivo)
-        self._botao(topo, 'Restaurar padrões',
-                    self._restaurar_padroes).pack(side='right', padx=4)
+        seg = ctk.CTkSegmentedButton(
+            topo, values=list(self._DISP_LBL), command=self._cb_disp_seg,
+            font=F_SUP, height=32, fg_color=COR_ITEM,
+            selected_color=COR_ACAO, selected_hover_color=COR_HOVER,
+            unselected_color=COR_ITEM, unselected_hover_color='#2f3038',
+            text_color=COR_TXT)
+        seg.pack(side='right')
+        self._seg_disp = seg
+        def _seg_sync(*_a, v=self._var_disp):
+            alvo = next((lbl for lbl, m in self._DISP_LBL.items()
+                         if m == v.get()), v.get())
+            try:
+                self._seg_disp.set(alvo)
+            except Exception:
+                pass
+        self._seg_sync = _seg_sync
+        self._var_disp.trace_add('write', _seg_sync)
+        _seg_sync()                                  # posiciona o segmented
+        self._botao(quad, 'Restaurar padrões',
+                    self._restaurar_padroes).pack(side='bottom', anchor='e',
+                                                  padx=12, pady=(0, 10))
 
-        self._montar_frame_dir('direcao', ' Controle (xbox)')
+        self._montar_frame_dir('direcao', 'CONTROLE (XBOX)')
         self._montar_frame_volante()
         self._montar_frame_sensor()
-        self._montar_mapa()
         self._atualizar_visibilidade()
 
+    def _menu(self, pai, valores, var, cb):
+        return ctk.CTkOptionMenu(
+            pai, values=valores, variable=var, command=cb, width=180,
+            font=F_SUP, dropdown_font=F_SUP, fg_color=COR_ITEM,
+            button_color=COR_ITEM, button_hover_color=COR_ACAO,
+            dropdown_fg_color=COR_PAINEL2, dropdown_hover_color=COR_ITEM,
+            dropdown_text_color=COR_TXT, text_color=COR_TXT)
+
     def _montar_frame_dir(self, sec, titulo):
-        """Frame de condução de um modo (combos + 5 sliders)."""
-        quad = tk.LabelFrame(self._scroll_frame, text=' %s — condução ' % titulo,
-                             bg=COR_PAINEL, fg=COR_TXT, bd=1, relief='flat')
+        """Card de condução de um modo (menus + 5 sliders)."""
+        quad = ctk.CTkFrame(self._tab_dir, fg_color=COR_PAINEL2,
+                            corner_radius=10)
         self._frames_cfg[sec] = quad
         self.v_modo[sec] = tk.StringVar(value=self.cfg[sec]['modo'])
         self.v_inv[sec] = tk.StringVar(
             value='invertida' if self.cfg[sec]['inverter'] < 0 else 'normal')
-        topo = tk.Frame(quad, bg=COR_PAINEL)
-        topo.pack(fill='x', padx=10, pady=(8, 0))
-        for lado, (texto, valores, var, cb) in enumerate((
-                ('Modo de dirigir', ['angulo', 'taxa'], self.v_modo[sec],
-                 lambda _e, s=sec: self._cb_modo(s)),
-                ('Direção', ['normal', 'invertida'], self.v_inv[sec],
-                 lambda _e, s=sec: self._cb_inverter(s)))):
-            col = tk.Frame(topo, bg=COR_PAINEL)
-            col.pack(side='left', padx=(0, 30))
-            tk.Label(col, text=texto, bg=COR_PAINEL, fg=COR_MUT,
-                     font=('Segoe UI', 9)).pack(anchor='w')
-            c = ttk.Combobox(col, textvariable=var, width=10,
-                             values=valores, state='readonly')
-            c.pack(anchor='w', pady=2)
-            c.bind('<<ComboboxSelected>>', cb)
+        topo = ctk.CTkFrame(quad, fg_color='transparent')
+        topo.pack(fill='x', padx=12, pady=(12, 4))
+        ctk.CTkLabel(topo, text='%s — CONDUÇÃO' % titulo,
+                     font=F_TIT, text_color=COR_MUT).pack(side='left')
+        col = ctk.CTkFrame(topo, fg_color='transparent')
+        col.pack(side='right')
+        ctk.CTkLabel(col, text='DIREÇÃO', text_color=COR_MUT,
+                     font=F_SUP).pack(anchor='w')
+        self._menu(col, ['normal', 'invertida'], self.v_inv[sec],
+                   lambda val, s=sec: self._cb_inverter(s)) \
+            .pack(anchor='e', pady=(2, 0))
+        self.v_modo[sec].set(self.cfg[sec]['modo'])
         self._grade_sliders(quad, sec, self.SLIDERS_CONDUCAO, 0,
                             dica=self.DICA_CURVA)
 
     def _montar_frame_volante(self):
-        """Frame completo do modo volante: condução + rotação e pedais."""
+        """Card completo do modo volante: condução + rotação e pedais."""
         sec = 'direcao_volante'
-        quad = tk.LabelFrame(
-            self._scroll_frame,
-            text=' Volante (volante) — condução, rotação e pedais ',
-            bg=COR_PAINEL, fg=COR_TXT, bd=1, relief='flat')
+        quad = ctk.CTkFrame(self._tab_dir, fg_color=COR_PAINEL2,
+                            corner_radius=10)
         self._frames_cfg['volante_completo'] = quad
         self.v_modo[sec] = tk.StringVar(value=self.cfg[sec]['modo'])
         self.v_inv[sec] = tk.StringVar(
             value='invertida' if self.cfg[sec]['inverter'] < 0 else 'normal')
-        topo = tk.Frame(quad, bg=COR_PAINEL)
-        topo.pack(fill='x', padx=10, pady=(8, 0))
-        for lado, (texto, valores, var, cb) in enumerate((
-                ('Modo de dirigir', ['angulo', 'taxa'], self.v_modo[sec],
-                 lambda _e, s=sec: self._cb_modo(s)),
-                ('Direção', ['normal', 'invertida'], self.v_inv[sec],
-                 lambda _e, s=sec: self._cb_inverter(s)))):
-            col = tk.Frame(topo, bg=COR_PAINEL)
-            col.pack(side='left', padx=(0, 30))
-            tk.Label(col, text=texto, bg=COR_PAINEL, fg=COR_MUT,
-                     font=('Segoe UI', 9)).pack(anchor='w')
-            c = ttk.Combobox(col, textvariable=var, width=10,
-                             values=valores, state='readonly')
-            c.pack(anchor='w', pady=2)
-            c.bind('<<ComboboxSelected>>', cb)
+        topo = ctk.CTkFrame(quad, fg_color='transparent')
+        topo.pack(fill='x', padx=12, pady=(12, 4))
+        ctk.CTkLabel(topo, text='VOLANTE — CONDUÇÃO',
+                     font=F_TIT, text_color=COR_MUT).pack(side='left')
+        col = ctk.CTkFrame(topo, fg_color='transparent')
+        col.pack(side='right')
+        ctk.CTkLabel(col, text='DIREÇÃO', text_color=COR_MUT,
+                     font=F_SUP).pack(anchor='w')
+        self._menu(col, ['normal', 'invertida'], self.v_inv[sec],
+                   lambda val, s=sec: self._cb_inverter(s)) \
+            .pack(anchor='e', pady=(2, 0))
         self._grade_sliders(quad, 'direcao_volante',
                             self.SLIDERS_CONDUCAO, 0,
                             dica=self.DICA_CURVA)
-        sep = tk.Frame(quad, bg=COR_GRADE, height=1)
-        rot_peds = tk.Frame(quad, bg=COR_PAINEL)
-        rot_peds.pack(fill='x', padx=10, pady=(4, 0))
-        tk.Label(rot_peds, text='Pedais e rotação do volante virtual '
-                                '(L2 = freio, R2 = acelerador)',
-                 bg=COR_PAINEL, fg=COR_MUT,
-                 font=('Segoe UI', 9)).pack(anchor='w')
-        self.lbl_pedais = tk.Label(rot_peds, text='repouso detectado: —',
-                                 bg=COR_PAINEL, fg=COR_MUT,
-                                 font=('Segoe UI', 9))
-        self.lbl_pedais.pack(anchor='w')
-        peds = tk.Frame(quad, bg=COR_PAINEL)
+        rot_peds = ctk.CTkFrame(quad, fg_color='transparent')
+        rot_peds.pack(fill='x', padx=12, pady=(2, 0))
+        ctk.CTkLabel(rot_peds, text='PEDAIS E ROTAÇÃO (L2 = freio · '
+                                    'R2 = acelerador)',
+                     font=F_TIT, text_color=COR_MUT).pack(side='left')
+        self.lbl_pedais = ctk.CTkLabel(rot_peds, text='repouso detectado: —',
+                                       text_color=COR_MUT, font=F_SUP)
+        self.lbl_pedais.pack(side='right')
+        peds = ctk.CTkFrame(quad, fg_color='transparent')
         self._grade_sliders(quad, 'volante', self.SLIDERS_VOLANTE,
                             0, dentro=peds)
-        peds.pack(fill='x', padx=10, pady=(0, 10))
+        peds.pack(fill='x', padx=12, pady=(2, 10))
 
     def _montar_frame_sensor(self):
-        quad = tk.LabelFrame(self._scroll_frame, text=' Sensor (comum aos dois modos) ',
-                             bg=COR_PAINEL, fg=COR_TXT, bd=1, relief='flat')
+        quad = ctk.CTkFrame(self._tab_sensor, fg_color=COR_PAINEL2,
+                            corner_radius=10)
         self._frame_sensor = quad
-        top = tk.Frame(quad, bg=COR_PAINEL)
-        top.pack(fill='x', padx=10, pady=(8, 0))
+        quad.pack(fill='x', padx=10, pady=(10, 6))
+        top = ctk.CTkFrame(quad, fg_color='transparent')
+        top.pack(fill='x', padx=12, pady=(12, 6))
+        ctk.CTkLabel(top, text='SENSOR (COMUM AOS DOIS MODOS)',
+                     font=F_TIT, text_color=COR_MUT).pack(side='left')
+        linha = ctk.CTkFrame(quad, fg_color='transparent')
+        linha.pack(fill='x', padx=12, pady=(0, 10))
         eix_s = self.cfg.get('sensor', {})
 
         def _rotulo_eixo(v):
@@ -921,14 +955,11 @@ class App:
                 ('Guardar calibração detectada',
                  ['sim', 'nao'], self._var_salvar_cal,
                  self._cb_salvar_cal)):
-            col = tk.Frame(top, bg=COR_PAINEL)
+            col = ctk.CTkFrame(linha, fg_color='transparent')
             col.pack(side='left', padx=(0, 30))
-            tk.Label(col, text=texto, bg=COR_PAINEL, fg=COR_MUT,
-                     font=('Segoe UI', 9)).pack(anchor='w')
-            c = ttk.Combobox(col, textvariable=var, width=8,
-                             values=valores, state='readonly')
-            c.pack(anchor='w', pady=2)
-            c.bind('<<ComboboxSelected>>', cb)
+            ctk.CTkLabel(col, text=texto, text_color=COR_MUT,
+                         font=F_SUP).pack(anchor='w')
+            self._menu(col, valores, var, cb).pack(anchor='w', pady=(2, 0))
         self._grade_sliders(
             quad, 'sensor',
             (('peso_accelerometro', 'Peso do acelerômetro', 0.0, 0.10, 0.005),),
@@ -949,37 +980,47 @@ class App:
 
     def _grade_sliders(self, quad, sec, lista, linha_inicial, dentro=None,
                        dica=None):
-        """Coloca os sliders de uma seção em 2 colunas; o valor numérico
-        é um campo digitável (Enter/FocusOut aplica; fora da faixa corta)."""
-        grade = dentro or tk.Frame(quad, bg=COR_PAINEL)
+        """Sliders CTk em 2 colunas; o valor é um chip digitável
+        (Enter/FocusOut aplica; fora da faixa corta; inválido volta)."""
+        grade = dentro or ctk.CTkFrame(quad, fg_color='transparent')
         if dentro is None:
-            grade.pack(fill='x', padx=10, pady=(2, 10))
+            grade.pack(fill='x', padx=12, pady=(2, 10))
         for i, (chave, rotulo, mn, mx, passo) in enumerate(lista):
-            cell = tk.Frame(grade, bg=COR_PAINEL)
+            cell = ctk.CTkFrame(grade, fg_color='transparent')
             cell.grid(row=linha_inicial + i // 2, column=i % 2,
-                      sticky='nwe', padx=8, pady=3)
-            tk.Label(cell, text=rotulo, bg=COR_PAINEL, fg=COR_MUT,
-                     wraplength=210, justify='left', anchor='w',
-                     font=('Segoe UI', 9)).pack(anchor='w', fill='x')
+                      sticky='nwe', padx=6, pady=3)
+            ctk.CTkLabel(cell, text=rotulo, text_color=COR_MUT,
+                         wraplength=210, justify='left', anchor='w',
+                         font=F_SUP).pack(anchor='w', fill='x')
             var = tk.DoubleVar(value=float(self.cfg.get(sec, {}).get(
                 chave, M.DEFAULTS.get(sec, {}).get(chave, 0.0))))
             val_var = tk.StringVar()
-            linha = tk.Frame(cell, bg=COR_PAINEL)
+            linha = ctk.CTkFrame(cell, fg_color='transparent')
             linha.pack(fill='x')
-            ttk.Scale(linha, from_=mn, to=mx, variable=var,
-                      command=lambda val, s=sec, ch=chave, vv=val_var:
-                      self._cb_slider(s, ch, val, vv)).pack(
-                side='left', fill='x', expand=True)
-            ent = tk.Entry(linha, textvariable=val_var, width=7,
-                           font=('Consolas', 10, 'bold'), bg=COR_BG,
-                           fg=COR_TXT, relief='flat', justify='center',
-                           highlightthickness=1,
-                           highlightbackground=COR_GRADE,
-                           insertbackground=COR_TXT)
-            ent.pack(side='right', padx=(6, 0))
+            passos = max(1, int(round((mx - mn) / passo)))
+            slider = ctk.CTkSlider(
+                linha, from_=mn, to=mx, number_of_steps=passos,
+                height=22,
+                command=lambda val, s=sec, ch=chave, vv=val_var:
+                self._cb_slider(s, ch, val, vv),
+                fg_color=COR_ITEM, progress_color=COR_ACAO,
+                button_color='#f5f5f7', button_hover_color=COR_ACAO,
+                corner_radius=4, button_corner_radius=8)
+            slider.pack(side='left', fill='x', expand=True)
+            slider.set(var.get())
+            ent = ctk.CTkEntry(linha, textvariable=val_var, width=76,
+                               height=28, corner_radius=6, font=F_MONO,
+                               fg_color=COR_CARD, border_color=COR_GRADE,
+                               text_color=COR_TXT, justify='center',
+                               border_width=1)
+            ent.pack(side='right', padx=(8, 0))
 
             def commit(_e=None, s=sec, ch=chave, mn=mn, mx=mx, var=var,
-                       vv=val_var):
+                       vv=val_var, sw=None):
+                try:
+                    sw = self._slider_w[(s, ch)]
+                except KeyError:
+                    pass
                 bruto = (vv.get() or '').strip().replace(',', '.')
                 try:
                     v = float(bruto)
@@ -988,59 +1029,56 @@ class App:
                     return
                 if v < mn or v > mx:           # fora da faixa: corta
                     v = max(mn, min(mx, v))
-                var.set(v)                     # move o slider
-                # ttk.Scale só dispara command ao interagir; aplica na mão:
-                self._cb_slider(s, ch, v, vv)
+                var.set(v)
+                if sw is not None:
+                    sw.set(v)   # posiciona o knob (set() não dispara command)
+                self._cb_slider(s, ch, v, vv)   # aplica sempre
 
             ent.bind('<Return>', commit)
             ent.bind('<KP_Enter>', commit)
             ent.bind('<FocusOut>', commit)
             ent.bind('<FocusIn>',
-                     lambda _e, e=ent: e.selection_range(0, 'end'))
+                     lambda _e, e=ent: e.select_range(0, 'end'))
             self._sliders[(sec, chave)] = (var, val_var)
+            self._slider_w[(sec, chave)] = slider
             self._cb_slider(sec, chave, var.get(), val_var, aplicar=False)
         for col in range(2):
             grade.columnconfigure(col, weight=1, uniform='sliders')
         if dica:
-            tk.Label(quad, text=dica, bg=COR_PAINEL, fg=COR_MUT,
-                     wraplength=430, justify='left',
-                     font=('Segoe UI', 8)).pack(fill='x', padx=14,
-                                                pady=(0, 6))
+            ctk.CTkLabel(quad, text=dica, text_color=COR_MUT,
+                         wraplength=520, justify='left', font=F_SUP) \
+                .pack(fill='x', padx=16, pady=(0, 10))
 
     def _atualizar_visibilidade(self):
-        """Mostra só os frames do modo escolhido (xbox / volante)."""
+        """Mostra só o card do modo escolhido (xbox / volante)."""
         modo = self.cfg.get('dispositivo', {}).get('modo', 'xbox')
         f_xbox = self._frames_cfg.get('direcao')
         f_vol = self._frames_cfg.get('volante_completo')
-        try:
-            f_xbox.pack_forget()
-        except Exception:
-            pass
-        try:
-            f_vol.pack_forget()
-        except Exception:
-            pass
-        self._frame_sensor.pack(fill='x', padx=12, pady=6,
-                                before=self._mapa_frame)
+        for f in (f_xbox, f_vol):
+            try:
+                f.pack_forget()
+            except Exception:
+                pass
         f_modo = f_vol if modo == 'volante' else f_xbox
         if f_modo is not None:
-            f_modo.pack(fill='x', padx=12, pady=6,
-                        before=self._frame_sensor)
+            f_modo.pack(fill='x', padx=10, pady=6)
 
 
     def _montar_mapa(self):
         """Mapa de botões: DualSense desenhado no canvas; botão pressionado
         acende azul na posição certa; clique abre a janela de função."""
-        mapa_quad = tk.LabelFrame(
-            self._scroll_frame,
-            text=' Mapa de botões  (azul = pressionado; clique um botão '
-                 'para escolher a função) ',
-            bg=COR_PAINEL, fg=COR_TXT, bd=1, relief='flat')
+        mapa_quad = ctk.CTkFrame(self._tab_mapa, fg_color=COR_PAINEL2,
+                                 corner_radius=10)
         self._mapa_frame = mapa_quad
-        mapa_quad.pack(fill='x', padx=12, pady=6)
-        c = tk.Canvas(mapa_quad, width=640, height=340, bg=COR_BG,
-                      highlightthickness=0)
-        c.pack(anchor='center', padx=10, pady=(2, 8))
+        ctk.CTkLabel(
+            mapa_quad, text='MAPA DE BOTÕES  ·  acesa (vermelho) = '
+                            'pressionado  ·  clique um botão para escolher '
+                            'a função',
+            font=F_TIT, text_color=COR_MUT).pack(anchor='w', padx=12,
+                                                 pady=(12, 2))
+        c = tk.Canvas(mapa_quad, width=640, height=340, bg=COR_CARD,
+                      highlightthickness=1, highlightbackground=COR_GRADE)
+        c.pack(anchor='center', padx=12, pady=(2, 12))
         self._mapa_canv = c
         self._mapa_cells = {}
         self._mapa_vars = {}
@@ -1059,12 +1097,12 @@ class App:
             return c.create_polygon(*pts, fill=fill, outline=outline,
                                     width=w, smooth=True)
 
-        def txt(x, y, s, cor=COR_MUT, f=('Segoe UI', 8), anc='n'):
+        def txt(x, y, s, cor=COR_MUT, f=('DejaVu Sans Condensed', 10), anc='n'):
             return c.create_text(x, y, text=s, fill=cor, font=f, anchor=anc)
 
         info_def = 'clique um botão do controle para escolher a função'
         info = c.create_text(68, 13, anchor='w', fill=COR_MUT,
-                             font=('Segoe UI', 8), text=info_def)
+                             font=('DejaVu Sans Condensed', 10), text=info_def)
 
         def hov_nome(nome):
             saida = self.cfg.get('mapa_botoes', {}).get(
@@ -1113,35 +1151,35 @@ class App:
             fill='#1b2230', outline=COR_GRADE, width=2, smooth=True)
 
         # touchpad (o clique é o botão 'touchpad')
-        tp = rrect(292, 56, 348, 96, 10, '#2b3550')
-        c.create_line(292, 76, 348, 76, fill='#0d1118', width=2)
+        tp = rrect(292, 56, 348, 96, 10, '#33363f')
+        c.create_line(292, 76, 348, 76, fill=COR_CARD, width=2)
         txt(320, 108, 'touchpad (clique)')
-        liga('touchpad', tp, '#2b3550')
+        liga('touchpad', tp, '#33363f')
 
         # create / options
-        cr = rrect(260, 100, 270, 128, 5, '#2b3550')
+        cr = rrect(260, 100, 270, 128, 5, '#33363f')
         txt(265, 136, 'Create')
-        liga('create', cr, '#2b3550')
-        op = rrect(370, 100, 380, 128, 5, '#2b3550')
+        liga('create', cr, '#33363f')
+        op = rrect(370, 100, 380, 128, 5, '#33363f')
         txt(375, 136, 'Options')
-        liga('options', op, '#2b3550')
+        liga('options', op, '#33363f')
 
         # sticks (pressionar = L3/R3)
         for nome, sx in (('l3', 198), ('r3', 442)):
             c.create_oval(sx - 23, 95, sx + 23, 141, fill='#151b26',
-                          outline='#0d1118', width=3)
-            inn = c.create_oval(sx - 11, 107, sx + 11, 129, fill='#2b3550',
-                                outline='#0d1118', width=2)
+                          outline='#101116', width=3)
+            inn = c.create_oval(sx - 11, 107, sx + 11, 129, fill='#33363f',
+                                outline='#101116', width=2)
             txt(sx, 148, nome.upper())
-            liga(nome, inn, '#2b3550')
+            liga(nome, inn, '#33363f')
 
         # L1 / R1
-        l1 = rrect(100, 34, 168, 52, 9, '#2b3550')
-        txt(134, 43, 'L1', COR_TXT, ('Segoe UI', 8, 'bold'), 'center')
-        liga('l1', l1, '#2b3550')
-        r1 = rrect(472, 34, 540, 52, 9, '#2b3550')
-        txt(506, 43, 'R1', COR_TXT, ('Segoe UI', 8, 'bold'), 'center')
-        liga('r1', r1, '#2b3550')
+        l1 = rrect(100, 34, 168, 52, 9, '#33363f')
+        txt(134, 43, 'L1', COR_TXT, ('DejaVu Sans Condensed', 10, 'bold'), 'center')
+        liga('l1', l1, '#33363f')
+        r1 = rrect(472, 34, 540, 52, 9, '#33363f')
+        txt(506, 43, 'R1', COR_TXT, ('DejaVu Sans Condensed', 10, 'bold'), 'center')
+        liga('r1', r1, '#33363f')
 
         # d-pad (4 botões separados em cruz)
         for nome, x1, y1, x2, y2, t_pts in (
@@ -1153,9 +1191,9 @@ class App:
                  (129, 198, 129, 212, 117, 205)),
                 ('direita', 147, 192, 168, 218,
                  (151, 198, 151, 212, 163, 205))):
-            arm = rrect(x1, y1, x2, y2, 5, '#2b3550')
-            c.create_polygon(*t_pts, fill='#0d1118', outline='')
-            liga(nome, arm, '#2b3550')
+            arm = rrect(x1, y1, x2, y2, 5, '#33363f')
+            c.create_polygon(*t_pts, fill=COR_CARD, outline='')
+            liga(nome, arm, '#33363f')
 
         # botões do rosto
         for nome, cx, cy, sym in (('quadrado', 461, 206, '□'),
@@ -1163,20 +1201,20 @@ class App:
                                   ('cruz', 484, 231, '✕'),
                                   ('circulo', 507, 206, '○')):
             ov = c.create_oval(cx - 13, cy - 13, cx + 13, cy + 13,
-                               fill='#2b3550', outline='#151b26', width=2)
+                               fill='#33363f', outline='#151b26', width=2)
             g = c.create_text(cx, cy + 1, text=sym, fill='#9fb2d4',
-                              font=('Segoe UI', 10, 'bold'))
+                              font=('DejaVu Sans Condensed', 11, 'bold'))
             c.tag_bind(g, '<Button-1>',
                        lambda _e, nm=nome: self._mapa_dialogo(nm))
             c.tag_bind(g, '<Enter>', lambda e, nm=nome: ent(e, nm))
             c.tag_bind(g, '<Leave>', sai)
-            liga(nome, ov, '#2b3550')
+            liga(nome, ov, '#33363f')
 
         # PS
-        ps = c.create_oval(306, 198, 334, 226, fill='#2b3550',
+        ps = c.create_oval(306, 198, 334, 226, fill='#33363f',
                            outline='#151b26', width=2)
         txt(320, 232, 'PS')
-        liga('ps', ps, '#2b3550')
+        liga('ps', ps, '#33363f')
 
     def _mapa_no(self, x, y):
         """Nome do botão do mapa sob (x, y): primeiro por raio (anéis),
@@ -1220,13 +1258,13 @@ class App:
                 ('ps', 637, 400, 50)):
             anel = c.create_oval(dx + (cx - r) * s, dy + (cy - r) * s,
                                  dx + (cx + r) * s, dy + (cy + r) * s,
-                                 fill='', outline='#3d455e',
+                                 fill='', outline=COR_GRADE,
                                  dash=(3, 2), width=1)
             liga(nome, anel, None, clique=False)
             self._mapa_ptos[nome] = (dx + cx * s, dy + cy * s, r * s)
         tp = c.create_rectangle(dx + 378 * s, dy + 28 * s,
                                 dx + 882 * s, dy + 292 * s,
-                                fill='', outline='#3d455e',
+                                fill='', outline=COR_GRADE,
                                 dash=(3, 2), width=1)
         liga('touchpad', tp, None, clique=False)
         self._mapa_ret['touchpad'] = (dx + 378 * s, dy + 28 * s,
@@ -1249,22 +1287,22 @@ class App:
         quad = tk.Frame(win, bg=COR_PAINEL)
         quad.pack(fill='both', expand=True)
         tk.Label(quad, bg=COR_PAINEL, fg=COR_TXT,
-                 font=('Segoe UI', 11, 'bold'),
+                 font=F_TIT,
                  text='"%s" → o que enviar ao device virtual:'
                  % ROTULOS_DS.get(nome, nome)).pack(
             anchor='w', padx=14, pady=(12, 4))
-        tk.Label(quad, bg=COR_PAINEL, fg=COR_MUT, font=('Segoe UI', 9),
+        tk.Label(quad, bg=COR_PAINEL, fg=COR_MUT, font=F_SUP,
                  text='Escolha na lista e clique em Aplicar (duplo clique '
                       'também aplica).').pack(anchor='w', padx=14)
-        lq = tk.Frame(quad, bg=COR_BG, bd=1, relief='flat',
+        lq = tk.Frame(quad, bg=COR_CARD, bd=1, relief='flat',
                       highlightthickness=1, highlightbackground=COR_GRADE)
         lq.pack(fill='x', padx=14, pady=(8, 6))
-        lb = tk.Listbox(lq, height=16, bg=COR_BG, fg=COR_TXT,
-                        selectbackground='#2563eb', bd=0,
+        lb = tk.Listbox(lq, height=16, bg=COR_CARD, fg=COR_TXT,
+                        selectbackground=COR_ACAO, bd=0,
                         highlightthickness=0,
-                        font=('Segoe UI', 10), activestyle='none',
+                        font=F_TXT, activestyle='none',
                         exportselection=False)
-        sb = ttk.Scrollbar(lq, orient='vertical', command=lb.yview)
+        sb = tk.Scrollbar(lq, orient='vertical', command=lb.yview)
         lb.configure(yscrollcommand=sb.set)
         sb.pack(side='right', fill='y')
         lb.pack(side='left', fill='both', expand=True)
@@ -1316,26 +1354,28 @@ class App:
         win.focus_set()
         lb.focus_set()
     def _montar_presets(self):
-        quad = tk.LabelFrame(self._scroll_frame, text=' Presets de configuração ',
-                             bg=COR_PAINEL, fg=COR_TXT, bd=1, relief='flat')
-        quad.pack(fill='x', padx=12, pady=6)
-        linha = tk.Frame(quad, bg=COR_PAINEL)
-        linha.pack(fill='x', padx=10, pady=6)
-        tk.Label(linha, text='Preset:', bg=COR_PAINEL, fg=COR_MUT,
-                 font=('Segoe UI', 10)).pack(side='left')
-        self._var_preset = tk.StringVar()
-        self._preset_combo = ttk.Combobox(linha, textvariable=self._var_preset,
-                                          values=presets_lista(), width=28,
-                                          state='readonly')
-        self._preset_combo.pack(side='left', padx=(8, 4))
-        self._preset_combo.bind('<<ComboboxSelected>>', self._cb_preset)
-        self._botao(linha, 'Salvar atual como preset…',
-                    self._preset_salvar).pack(side='left', padx=6)
+        quad = ctk.CTkFrame(self._tab_presets, fg_color=COR_PAINEL2,
+                            corner_radius=10)
+        quad.pack(fill='x', padx=10, pady=(10, 6))
+        ctk.CTkLabel(quad, text='PRESETS DE CONFIGURAÇÃO',
+                     font=F_TIT, text_color=COR_MUT).pack(
+            anchor='w', padx=12, pady=(12, 4))
+        linha = ctk.CTkFrame(quad, fg_color='transparent')
+        linha.pack(fill='x', padx=12, pady=(0, 12))
+        self._var_preset = tk.StringVar(
+            value=(presets_lista() or ['—'])[0])
+        self._preset_combo = self._menu(
+            linha, presets_lista() or ['—'], self._var_preset,
+            self._cb_preset)
+        self._preset_combo.configure(width=260)
+        self._preset_combo.pack(side='left')
+        self._botao(linha, 'Salvar como preset…',
+                    self._preset_salvar).pack(side='left', padx=(10, 6))
         self._botao(linha, 'Excluir preset',
                     self._preset_excluir).pack(side='left', padx=6)
-        tk.Label(linha, text='selecionar na lista carrega a config na hora',
-                 bg=COR_PAINEL, fg=COR_MUT, font=('Segoe UI', 9)).pack(
-            side='left', padx=10)
+        ctk.CTkLabel(linha, text='selecionar na lista carrega a config na hora',
+                     text_color=COR_MUT, font=F_SUP).pack(
+            anchor='w', padx=(10, 0))
 
     def _aplicar_cfg_ui(self):
         """Reflete o self.cfg atual em todos os widgets e no motor."""
@@ -1347,8 +1387,12 @@ class App:
         self._var_disp.set(disp)
         for (sec, chave) in list(self._sliders):
             var, val_var = self._sliders[(sec, chave)]
-            var.set(float(self.cfg.get(sec, {}).get(chave, var.get())))
-            self._cb_slider(sec, chave, var.get(), val_var, aplicar=False)
+            v = float(self.cfg.get(sec, {}).get(chave, var.get()))
+            var.set(v)
+            sw = self._slider_w.get((sec, chave))
+            if sw is not None:
+                sw.set(v)
+            self._cb_slider(sec, chave, v, val_var, aplicar=False)
         s_cfg = self.cfg.get('sensor', {})
         eg = int(s_cfg.get('eixo_giro', -1))
         if hasattr(self, '_var_eixo'):
@@ -1409,14 +1453,14 @@ class App:
             with self.engine._lock:
                 self.engine._logs.append('erro ao salvar preset: %s' % e)
             return
-        self._preset_combo['values'] = presets_lista()
+        self._preset_combo.configure(values=presets_lista() or ['—'])
         self._var_preset.set(nome)
         with self.engine._lock:
             self.engine._logs.append('preset "%s" salvo' % nome)
 
     def _cb_preset(self, _ev=None):
         nome = self._var_preset.get()
-        if not nome or not os.path.exists(preset_path(nome)):
+        if not nome or nome == '—' or not os.path.exists(preset_path(nome)):
             return
         nova = M.load_cfg(preset_path(nome))
         self.cfg.clear()
@@ -1428,7 +1472,7 @@ class App:
 
     def _preset_excluir(self):
         nome = self._var_preset.get()
-        if not nome:
+        if not nome or nome == '—':
             return
         if not messagebox.askyesno('Excluir preset',
                                    'Apagar o preset "%s"?' % nome):
@@ -1437,21 +1481,28 @@ class App:
             os.remove(preset_path(nome))
         except OSError:
             pass
-        self._var_preset.set('')
-        self._preset_combo['values'] = presets_lista()
+        self._var_preset.set('—')
+        self._preset_combo.configure(values=presets_lista() or ['—'])
         with self.engine._lock:
             self.engine._logs.append('preset "%s" excluído' % nome)
 
     def _montar_logs(self):
-        self.txt_logs = tk.Text(self.root, height=4, bg=COR_PAINEL, fg=COR_MUT,
-                                bd=0, highlightthickness=1,
-                                highlightbackground=COR_GRADE,
-                                font=('Consolas', 9), state='disabled')
-        self.txt_logs.pack(fill='x', padx=12, pady=(4, 10))
+        quad = ctk.CTkFrame(self.root, fg_color=COR_PAINEL, corner_radius=10,
+                            border_width=1, border_color=COR_GRADE)
+        quad.pack(side='bottom', fill='x', padx=12, pady=(2, 10))
+        self.txt_logs = tk.Text(quad, height=3, bg=COR_CARD, fg=COR_MUT,
+                                bd=0, highlightthickness=0,
+                                font=('DejaVu Sans Mono', 10),
+                                state='disabled')
+        self.txt_logs.pack(fill='x', padx=10, pady=8)
 
     # ---------------------------------------------------------- callbacks
     def _cb_modo(self, sec):
         self.cfg[sec]['modo'] = self.v_modo[sec].get()
+
+    def _cb_disp_seg(self, valor):
+        self._var_disp.set(self._DISP_LBL.get(valor, valor))
+        self._cb_dispositivo()
 
     def _cb_dispositivo(self, _ev=None):
         modo = self._var_disp.get()
@@ -1511,14 +1562,16 @@ class App:
         if eng.is_alive():
             eng.encerrar()
             eng.join(timeout=2.5)
-            self.btn_motor.config(text='Ligar motor')
+            self.btn_motor.configure(text='LIGAR MOTOR', fg_color=COR_OK,
+                                     hover_color='#008a4c')
         else:
             novo = Engine(self.cfg)
             if eng._grab_quer:          # modo "ignorar" sobrevive à religada
                 novo._grab_quer = True
                 novo.state['ignorar'] = True
             self.engine = novo
-            self.btn_motor.config(text='Parar motor')
+            self.btn_motor.configure(text='PARAR MOTOR', fg_color=COR_ACAO,
+                                     hover_color=COR_HOVER)
             novo.start()
 
     def _salvar(self):
@@ -1549,9 +1602,11 @@ class App:
         if getattr(self, '_ignorar_ultimo', None) is not ign:
             self._ignorar_ultimo = ign
             try:
-                self._btn_ignorar.config(
-                    text='Ignorar controle original: %s'
-                         % ('LIGADO (jogo não vê)' if ign else 'desligado'))
+                sw = self._sw_ignorar
+                if bool(sw.get()) is not ign:
+                    (sw.select if ign else sw.deselect)()
+                self.lbl_ign.configure(
+                    text_color=COR_ACAO if ign else COR_MUT)
             except Exception:
                 pass
         self.root.after(33, self._tick)
@@ -1570,31 +1625,32 @@ class App:
             for nome, item in self._mapa_vis.items():
                 try:
                     if nome in novo:
-                        self._mapa_canv.itemconfig(item, outline='#3d8bfa',
+                        self._mapa_canv.itemconfig(item, outline=COR_ACAO,
                                                    width=3, dash='')
                     else:
                         self._mapa_canv.itemconfig(
-                            item, outline='#3d455e', width=1, dash=(3, 2))
+                            item, outline=COR_GRADE, width=1, dash=(3, 2))
                 except Exception:
                     pass
             return
         for nome, item in self._mapa_vis.items():
-            cor = '#2563eb' if nome in novo else self._mapa_base.get(
-                nome, '#2b3550')
+            cor = COR_ACAO if nome in novo else self._mapa_base.get(
+                nome, '#3a3f4e')
             try:
                 self._mapa_canv.itemconfig(item, fill=cor)
             except Exception:
                 pass
 
     def _atualizar_texto(self, st):
-        self.lbl_status.config(text=st['status'], fg=st['cor'])
+        self.lbl_status.configure(text=st['status'], text_color=st['cor'])
         disp = self.engine.cfg.get('dispositivo', {}).get('modo', 'xbox')
         extra = ' · %s · %s (%s)' % (
             st['hidraw'], Steer.PERFIL.get(disp, Steer.PERFIL['xbox'])['name'],
             disp) if st['virtual'] else \
                 ' · %s' % st['hidraw'] if st['hidraw'] else ''
-        self.lbl_hid.config(text='%s%.0f rel/s' % (extra + ' · ', st['rps'])
-                            if st['rps'] else extra)
+        self.lbl_hid.configure(
+            text='%s%.0f rel/s' % (extra + ' · ', st['rps'])
+            if st['rps'] else extra)
         eix_novo = st.get('eixo_detectado')
         if eix_novo is not None:
             if hasattr(self, '_var_eixo'):
@@ -1603,8 +1659,8 @@ class App:
                 self.engine.state['eixo_detectado'] = None
         pr = st.get('pedal_rest', (0.0, 0.0))
         if pr and hasattr(self, 'lbl_pedais'):
-            self.lbl_pedais.config(
-                text='repouso detectado: freio %.0f / acel %.0f (subtraído)'
+            self.lbl_pedais.configure(
+                text='repouso: freio %.0f / acel %.0f (subtraído)'
                      % (pr[0], pr[1]))
         logs = self.engine.logs()
         self.txt_logs.config(state='normal')
@@ -1613,7 +1669,7 @@ class App:
             self.txt_logs.insert('end', '\n'.join(logs[-5:]))
         self.txt_logs.config(state='disabled')
 
-    def _rrect(self, c, x1, y1, x2, y2, r=10, fill='#0d1118',
+    def _rrect(self, c, x1, y1, x2, y2, r=10, fill=COR_CARD,
                outline=None, width=1):
         """Retângulo com cantos arredondados (polígono suavizado)."""
         r = max(0.0, min(r, (x2 - x1) / 2.0, (y2 - y1) / 2.0))
@@ -1654,15 +1710,15 @@ class App:
             wy = sz // 2 + 22
             c.create_image(wx, wy, image=self._wheel_tk)
             c.create_text(wx, wy + sz / 2 + 14, text='volante ' + st_rod,
-                          fill=COR_TXT, font=('Consolas', 12, 'bold'))
+                          fill=COR_TXT, font=('DejaVu Sans Mono', 12, 'bold'))
             c.create_text(wx, wy + sz / 2 + 29,
                           text='rotação total ±%.0f°' % gir_max,
-                          fill=COR_MUT, font=('Segoe UI', 8))
+                          fill=COR_MUT, font=('DejaVu Sans Condensed', 10))
         else:
             colx = w - 30       # sem imagem: layout anterior
 
         # ---- barras dos pedais (esquerda, HUD de corrida) ----
-        barw, gap = 44, 16
+        barw, gap = 44, 26
         px0 = 18
         pt = 34
         pb = h - 62
@@ -1671,16 +1727,16 @@ class App:
                                      (px0 + barw + gap, frei, COR_FREIO,
                                       'L2 freio')):
                 c.create_text(x + barw // 2, pt - 16, text=rot,
-                              fill=COR_MUT, font=('Segoe UI', 9))
+                              fill=COR_MUT, font=F_SUP)
                 self._rrect(c, x, pt, x + barw, pb, 10,
-                            fill='#0d1118', outline=COR_GRADE)
+                            fill=COR_CARD, outline=COR_GRADE)
                 fh = (pb - pt) * max(0.0, min(1.0, val))
                 if fh > 2.0:
                     self._rrect(c, x + 3, pb - fh, x + barw - 3, pb - 3, 7,
                                 fill=cor)
                 c.create_text(x + barw // 2, pb + 16,
                               text='%3.0f%%' % (val * 100.0),
-                              fill=cor, font=('Consolas', 12, 'bold'))
+                              fill=cor, font=('DejaVu Sans Mono', 12, 'bold'))
             midx = px0 + 2 * barw + gap
         else:
             midx = px0
@@ -1689,17 +1745,17 @@ class App:
         mx0, mx1 = midx + 22, colx - 18
         if mx1 - mx0 >= 140:
             gy0, gy1 = 26, h - 152
-            self._rrect(c, mx0, gy0, mx1, gy1, 12, fill='#0d1118',
+            self._rrect(c, mx0, gy0, mx1, gy1, 12, fill=COR_CARD,
                         outline=COR_GRADE)
             meio = (gy0 + gy1) / 2
             c.create_line(mx0 + 10, meio, mx1 - 10, meio,
-                          fill='#5a6a8a', dash=(4, 4))
+                          fill='#3a4050', dash=(4, 4))
             c.create_text(mx0 + 12, gy0 + 6, anchor='nw',
                           text='ângulo · últimos ~%ds' % (JANELA_HIST / 30.0),
-                          fill=COR_MUT, font=('Segoe UI', 9))
+                          fill=COR_MUT, font=F_SUP)
             c.create_text(mx1 - 12, gy0 + 6, anchor='ne',
                           text='escala ±%.0f°' % amax,
-                          fill=COR_MUT, font=('Segoe UI', 9))
+                          fill=COR_MUT, font=F_SUP)
             n = len(self.historico)
             if n > 2:
                 passo_x = (mx1 - mx0 - 20) / (JANELA_HIST - 1.0)
@@ -1719,33 +1775,33 @@ class App:
                 self.cfg.get('dispositivo', {}).get('modo', 'xbox'),
                 Steer.PERFIL['xbox'])['name']
             c.create_text(mx0, by - 16, anchor='w', fill=COR_MUT,
-                          font=('Segoe UI', 9),
+                          font=F_SUP,
                           text='esterço no device virtual "%s": %+05.1f%%'
                                % (nome_dev, st['out'] * 100.0))
-            self._rrect(c, mx0, by, mx1, by + bh, 12, fill='#0d1118',
+            self._rrect(c, mx0, by, mx1, by + bh, 12, fill=COR_CARD,
                         outline=COR_GRADE, width=2)
             c.create_line((mx0 + mx1) / 2, by, (mx0 + mx1) / 2, by + bh,
                           fill=COR_GRADE)
             kx = (mx0 + mx1) / 2 + max(-1.0, min(1.0, st['out'])) * \
                 (mx1 - mx0 - 30) / 2
             c.create_oval(kx - 12, by + 1, kx + 12, by + bh - 1,
-                          fill=COR_NEEDLE, outline='#23282f')
+                          fill=COR_NEEDLE, outline='#1a1b20')
             c.create_text(mx0 + 6, by + bh + 4, text='esquerda', anchor='nw',
-                          fill=COR_MUT, font=('Segoe UI', 9))
+                          fill=COR_MUT, font=F_SUP)
             c.create_text(mx1 - 6, by + bh + 4, text='direita', anchor='ne',
-                          fill=COR_MUT, font=('Segoe UI', 9))
+                          fill=COR_MUT, font=F_SUP)
             # ---- telemetria em números ----
             ny = by + bh + 30
             if ny < h - 12:
                 fnum = 13 if mx1 - mx0 >= 640 else 11
                 c.create_text(mx0, ny, anchor='w', fill=COR_TXT,
-                              font=('Consolas', fnum, 'bold'),
+                              font=('DejaVu Sans Mono', fnum, 'bold'),
                               text='ângulo %+07.2f°   esterço %+05.1f%%   '
                                    'giro %+07.1f°/s   |a| %.2f g'
                                    % (st['angle'], st['out'] * 100.0,
                                       st['dps'], st['ga']))
                 c.create_text(mx0, ny + 17, anchor='w', fill=COR_MUT,
-                              font=('Segoe UI', 9),
+                              font=F_SUP,
                               text='acel (x %+0.2f, y %+0.2f, z %+0.2f g)'
                                    % st['accel_g'])
 

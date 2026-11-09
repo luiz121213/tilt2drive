@@ -51,7 +51,8 @@ and drives a `uinput` virtual device that racing games understand:
 
 - Linux with `uinput` writable by your user
   (`sudo usermod -a -G input $USER`, re-login)
-- Python 3 with `tkinter` (Tk system package) and Pillow (GUI only)
+- Python 3 with `tkinter` + `customtkinter`; Pillow too (GUI only)
+  (`pip install --user customtkinter Pillow` — the engine is pure stdlib)
 - A game or emulator that sees evdev devices (F1 25 via Proton works well)
 
 ## Install
@@ -59,6 +60,7 @@ and drives a `uinput` virtual device that racing games understand:
 ```bash
 git clone https://github.com/Luiz121213/tilt2drive.git
 cd tilt2drive
+pip install --user customtkinter Pillow   # GUI deps
 ./code/tilt2drive-gui            # opens the window (engine starts inside)
 ./code/tilt2drive --debug        # CLI with HUD in the terminal
 ```
@@ -131,11 +133,13 @@ enxergar apenas o volante virtual.
 ```bash
 git clone https://github.com/Luiz121213/tilt2drive.git
 cd tilt2drive
+pip install --user customtkinter Pillow   # deps da GUI (motor é stdlib pura)
 ./code/tilt2drive-gui            # abre a janela (o motor inicia nela)
 ```
 
 Requisitos: Linux com `/dev/uinput` escrevível pelo seu usuário; Python 3 com
-`tkinter`; Pillow (só para a GUI). Na primeira calibração segure o controle
+`tkinter` + `customtkinter`, com Pillow — `pip install --user`
+`customtkinter Pillow`. Na primeira calibração segure o controle
 parado, na posição de jogar.
 
 **Dica para menus no F1 25:** mapeie ○ → "Enter (teclado)", □ → "Esc (teclado)",

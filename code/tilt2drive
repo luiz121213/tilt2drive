@@ -272,7 +272,10 @@ class Steer:
         self.mapping = mapping
         self._rev = {}          # saída -> entradas do DualSense que a disparam
         for ds, saida in mapping.items():
-            if saida in self._BOTAO or saida in self._BOTAO_W:
+            # botões do device + saídas de tecla (k_up, enter...) — as de
+            # tecla são o caminho do d-pad p/ o F1 25 (menus por teclado)
+            if saida in self._BOTAO or saida in self._BOTAO_W or \
+                    saida in self._K_TECLA:
                 self._rev.setdefault(saida, []).append(ds)
         self._hat_in = {'up': [], 'down': [], 'left': [], 'right': []}
         for ds, saida in mapping.items():
